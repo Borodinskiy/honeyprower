@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Панель управления</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="dark-theme">
+
+    <!-- Шапка -->
+    <header>
+        <div class="header-left">
+            <div class="logo">🌐</div>
+            
+            <nav>
+                <a href="#" class="nav-link active" data-tab="traps">Ловушки</a>
+                <a href="#" class="nav-link" data-tab="stats">Статистика</a>
+                <a href="#" class="nav-link" data-tab="events">События</a>
+            </nav>
+        </div>
+        <div class="header-right">
+            <label class="switch" title="Переключить тему">
+                <input type="checkbox" id="theme-toggle" checked>
+                <span class="slider round"></span>
+            </label>
+            
+            <select id="lang-switch" class="lang-switch">
+                <option value="ru" selected>Ru</option>
+                <option value="en">En</option>
+            </select>
+            
+            <div class="user-menu-container">
+                <button class="user-menu-btn" id="user-menu-btn">
+                    <span id="current-user-name">Войти</span> ▾
+                </button>
+                <div class="user-dropdown" id="user-dropdown">
+                    <a href="#" data-action="open-login">Войти</a>
+                    <a href="#" data-action="open-register">Регистрация</a>
+                    <a href="#" data-action="logout" style="color: #d32f2f;">Выйти</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Контент -->
+    <main>
+        <div class="breadcrumbs">
+            <a href="#">Главная</a> / <span id="current-tab-crumb">Ловушки</span>
+        </div>
+
+        <!-- ВКЛАДКА 1: ЛОВУШКИ -->
+        <section id="traps" class="tab-content active">
+            <div class="traps-header">
+                <h1>Ловушки</h1>
+                <div class="traps-actions">
+                    <button class="btn btn-secondary" id="open-events-trap-btn" disabled>События</button>
+                    <button class="btn btn-success" id="open-edit-trap-btn" disabled>Редактировать</button>
+                    <button class="btn btn-danger" id="delete-trap-btn" disabled>Удалить</button>
+                    <button class="btn btn-success" id="open-create-trap-btn">+ Создать ловушку</button>
+                </div>
+            </div>
+            
+            <div class="traps-toolbar">
+                <input type="text" id="traps-search" class="search-input" placeholder="Поиск ловушек по названию или IP...">
+            </div>
+
+            <div class="traps-list" id="traps-list-container"></div>
+        </section>
+
+        <!-- ВКЛАДКА 2: СТАТИСТИКА -->
+        <section id="stats" class="tab-content">
+            <h1>Статистика</h1>
+            
+            <div class="stats-grid" id="stats-container"></div>
+
+            <h2 style="font-size: 18px; margin-bottom: 15px;">Детализация по активным ловушкам</h2>
+            <div class="traps-list" id="traps-detail-container"></div>
+        </section>
+
+        <!-- ВКЛАДКА 3: СОБЫТИЯ -->
+        <section id="events" class="tab-content">
+            <h1>События</h1>
+
+            <div class="events-toolbar">
+                <label for="events-trap-select">Ловушка:</label>
+                <select id="events-trap-select" class="form-select"></select>
+            </div>
+
+            <div id="events-list" class="events-list"></div>
+        </section>
+    </main>
+
+    <!-- МОДАЛЬНОЕ ОКНО АВТОРИЗАЦИИ -->
+    <div id="auth-modal" class="modal-overlay">
+        <div class="modal-content">
+            <span class="close-btn" data-close-modal="auth-modal">&times;</span>
+            
+            <div id="login-form" class="auth-form active">
+                <h2>Вход в систему</h2>
+                <form id="login-form-el">
+                    <div class="form-group">
+                        <label>Логин</label>
+                        <input type="text" name="username" required placeholder="Введите логин">
+                    </div>
+                    <div class="form-group">
+                        <label>Пароль</label>
+                        <input type="password" name="password" required placeholder="Введите пароль">
+                    </div>
+                    <button type="submit" class="btn btn-success full-width">Войти</button>
+                </form>
+                <p class="auth-switch"><span>Нет аккаунта?</span> <a href="#" data-switch-form="register">Зарегистрироваться</a></p>
+            </div>
+
+            <div id="register-form" class="auth-form">
+                <h2>Регистрация</h2>
+                <form id="register-form-el">
+                    <div class="form-group">
+                        <label>Логин</label>
+                        <input type="text" name="username" required placeholder="Придумайте логин">
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" name="email" required placeholder="Введите email">
+                    </div>
+                    <div class="form-group">
+                        <label>Пароль</label>
+                        <input type="password" name="password" required placeholder="Придумайте пароль">
+                    </div>
+                    <button type="submit" class="btn btn-success full-width">Зарегистрироваться</button>
+                </form>
+                <p class="auth-switch"><span>Уже есть аккаунт?</span> <a href="#" data-switch-form="login">Войти</a></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- МОДАЛЬНОЕ ОКНО СОЗДАНИЯ / РЕДАКТИРОВАНИЯ ЛОВУШКИ -->
+    <div id="create-trap-modal" class="modal-overlay">
+        <div class="modal-content">
+            <span class="close-btn" data-close-modal="create-trap-modal">&times;</span>
+            <h2 id="trap-modal-title">Создание новой ловушки</h2>
+            
+            <form id="create-trap-form">
+                <div class="form-group">
+                    <label>Название ловушки</label>
+                    <input type="text" id="trap-name" required placeholder="Например: SSH Honeypot">
+                </div>
+                
+                <div class="form-group">
+                    <label>Тип ловушки</label>
+                    <select id="trap-type" class="form-select" required>
+                        <option value="SSH">SSH</option>
+                        <option value="Web">Web</option>
+                        <option value="FTP">FTP</option>
+                        <option value="RDP">RDP</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>IP-адрес или URL</label>
+                    <input type="text" id="trap-target" required placeholder="192.168.1.10:22 или http://10.0.0.5/">
+                </div>
+                
+                <div class="form-group checkbox-group">
+                    <input type="checkbox" id="trap-active" checked>
+                    <label for="trap-active">Активна</label>
+                </div>
+                
+                <button type="submit" class="btn btn-success full-width">Сохранить</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
