@@ -52,10 +52,10 @@
             <div class="traps-header">
                 <h1>Ловушки</h1>
                 <div class="traps-actions">
-                    <button class="btn btn-secondary" id="open-events-trap-btn" disabled>События</button>
-                    <button class="btn btn-success" id="open-edit-trap-btn" disabled>Редактировать</button>
-                    <button class="btn btn-danger" id="delete-trap-btn" disabled>Удалить</button>
-                    <button class="btn btn-success" id="open-create-trap-btn">+ Создать ловушку</button>
+                    <button class="btn btn-secondary" id="open-events-trap-btn" disabled hidden>События</button>
+                    <button class="btn btn-secondary" id="open-edit-trap-btn" disabled hidden>Редактировать</button>
+                    <button class="btn btn-danger" id="delete-trap-btn" disabled hidden>Удалить</button>
+                    <button class="btn" id="open-create-trap-btn">+ Создать ловушку</button>
                 </div>
             </div>
 
@@ -103,7 +103,7 @@
 
     <!-- МОДАЛЬНОЕ ОКНО СОЗДАНИЯ / РЕДАКТИРОВАНИЯ ЛОВУШКИ -->
     <div id="create-trap-modal" class="modal-overlay">
-        <div class="modal-content">
+        <div class="modal-content modal-wide">
             <span class="close-btn" data-close-modal="create-trap-modal">&times;</span>
             <h2 id="trap-modal-title">Создание новой ловушки</h2>
 
@@ -141,11 +141,16 @@
                     <input type="text" id="trap-ports" placeholder="9000-9003,10443">
                 </div>
 
-                <div class="form-group">
-                    <label>Параметры (JSON)</label>
-                    <textarea id="trap-params" class="code-input" rows="8" spellcheck="false"></textarea>
-                    <p class="field-help">Шаблон задаёт параметры; при желании отредактируйте JSON.</p>
+                <div class="form-group params-block">
+                    <div class="params-head">
+                        <span class="params-title">Параметры ловушки</span>
+                        <button type="button" class="link-btn" id="params-mode-btn">Редактировать как JSON</button>
+                    </div>
+                    <div id="params-form" class="params-form"></div>
+                    <textarea id="trap-params" class="code-input" rows="16" spellcheck="false" hidden></textarea>
                 </div>
+
+                <div id="trap-form-error" class="auth-error-message" hidden></div>
 
                 <div class="form-group checkbox-group">
                     <input type="checkbox" id="trap-active" checked>

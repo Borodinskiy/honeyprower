@@ -262,8 +262,8 @@ const EVENT_TYPE_LABELS = {
 };
 
 // Статусы ловушки.
-const STATUS_LABELS = { online: '● Online', offline: '● Offline', never: '○ Не выходила на связь' };
-const STATUS_COLORS = { online: '#10b981', offline: '#f59e0b', never: '#6b7280' };
+const STATUS_LABELS = { online: '● На связи', offline: '● Нет связи', never: '● Ждёт агента', disabled: '● Выключена' };
+const STATUS_COLORS = { online: '#10b981', offline: '#f59e0b', never: '#6b7280', disabled: '#6b7280' };
 
 // 2. СЛОВАРЬ ПЕРЕВОДОВ (каюсь грешен, переводил не сам, могут быть ошибки)
 
@@ -287,6 +287,19 @@ const I18N_DICT = {
     "Последнее": "Last",
 
     "Ловушек на связи": "Traps online",
+    "Дополнительные параметры": "Advanced parameters",
+    "Ещё": "More",
+    "Добавить": "Add",
+    "Редактировать как JSON": "Edit as JSON",
+    "Вернуться к форме": "Back to form",
+    "Ошибка в параметрах": "Invalid parameters",
+    "Параметры ловушки": "Trap parameters",
+    "● На связи": "● Online",
+    "● Нет связи": "● Offline",
+    "● Ждёт агента": "● Waiting for agent",
+    "● Выключена": "● Disabled",
+    "Адрес": "Address",
+    "Событий": "Events",
     "Включённых ловушек": "Enabled traps",
     "Предупреждения (за 24ч)": "Warnings (24h)",
     "Детализация по активным ловушкам": "Details for active traps",
@@ -477,9 +490,12 @@ function updateTrapActions() {
     const editBtn = document.getElementById('open-edit-trap-btn');
     const deleteBtn = document.getElementById('delete-trap-btn');
 
-    if (eventsBtn) eventsBtn.disabled = !hasSelection;
-    if (editBtn) editBtn.disabled = !hasSelection;
-    if (deleteBtn) deleteBtn.disabled = !hasSelection;
+    // Кнопки действий показываем только при выбранной ловушке — без выбора они лишь мешают.
+    for (const btn of [eventsBtn, editBtn, deleteBtn]) {
+        if (!btn) continue;
+        btn.disabled = !hasSelection;
+        btn.hidden = !hasSelection;
+    }
 }
 
 // Адрес ловушки: bind:port или bind + список портов.
@@ -495,21 +511,21 @@ function classTitle(classId) {
 
 // собирает структуру для карточки с ловушкой
 function buildTrapCard(trap) {
-    const status = trap.status || 'never';
+    const status = trap.enabled ? (trap.status || 'never') : 'disabled';
     const statusClass = status === 'online' ? '' : 'inactive';
-    const statusText = STATUS_LABELS[status] || status;
+    const statusText = t(STATUS_LABELS[status] || status);
     const statusColor = STATUS_COLORS[status] || '#6b7280';
     const selectedClass = state.selectedTrapId === trap.id ? 'selected' : '';
-    const enabledBadge = trap.enabled ? '' : ' <span style="color:#6b7280;font-size:11px;">(выключена)</span>';
 
     return `
         <div class="trap-item ${statusClass} ${selectedClass}" data-trap-id="${trap.id}">
             <div class="trap-title">
-                <span>${escapeHtml(trap.name)} <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(classTitle(trap.class))}</span>${enabledBadge}</span>
-                <span style="color: ${statusColor}; font-size: 12px;">${statusText}</span>
+                <span class="trap-name" title="${escapeHtml(trap.name)}">${escapeHtml(trap.name)}</span>
+                <span class="trap-status" style="color: ${statusColor};">${statusText}</span>
             </div>
-            <div class="trap-info">Адрес: ${escapeHtml(trapAddress(trap))}</div>
-            <div class="trap-info"><span>Событий</span>: ${escapeHtml(trap.totalEvents ?? 0)} · <span>${t('Предупреждений')}</span>: ${escapeHtml(trap.warnings ?? 0)} · <span>${t('Последнее')}</span>: ${escapeHtml(trap.lastEventAt ?? '—')}</div>
+            <div class="trap-info trap-class">${escapeHtml(classTitle(trap.class))}</div>
+            <div class="trap-info">${t('Адрес')}: ${escapeHtml(trapAddress(trap))}</div>
+            <div class="trap-info"><span>${t('Предупреждений')}</span>: ${escapeHtml(trap.warnings ?? 0)} · <span>${t('Событий')}</span>: ${escapeHtml(trap.totalEvents ?? 0)}</div>
         </div>
     `;
 }
@@ -746,6 +762,247 @@ function switchAuthForm(type) {
     if (registerForm) registerForm.classList.toggle('active', type === 'register');
 }
 
+// ---------- Форма параметров ловушки: строится по схеме класса (/api/classes) ----------
+
+const paramForm = {
+    classId: '',
+    params: {},             // редактируемый объект; ключи вне схемы сохраняются как есть
+    jsonMode: false,
+    collapsed: new WeakSet(), // свёрнутые элементы списков (по объекту — переживает перестановку)
+    advOpen: new Set()        // раскрытые блоки «Дополнительно» (по пути)
+};
+
+function currentClass() {
+    return state.classes.find(c => c.id === paramForm.classId);
+}
+
+function deepClone(v) {
+    return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+}
+
+function parseParams(value) {
+    if (!value) return {};
+    if (typeof value === 'string') {
+        try { return JSON.parse(value); } catch (e) { return {}; }
+    }
+    return deepClone(value);
+}
+
+// Значения по умолчанию из схемы: форма показывает и отправляет ровно то, с чем запустится агент.
+function fillDefaults(fields, obj) {
+    for (const f of fields || []) {
+        if (f.type === 'list') {
+            if (!Array.isArray(obj[f.key])) obj[f.key] = [];
+            obj[f.key].forEach(item => { if (item && typeof item === 'object') fillDefaults(f.item, item); });
+        } else if (obj[f.key] === undefined && f.default !== undefined) {
+            obj[f.key] = deepClone(f.default);
+        }
+    }
+    return obj;
+}
+
+// Управляющие символы показываем как \r \n \t — агент сам раскрывает эти последовательности.
+function toEditable(v) {
+    if (v === undefined || v === null) return '';
+    return String(v).replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t');
+}
+
+function isVisible(f, obj) {
+    if (!f.showIf) return true;
+    const cur = obj[f.showIf.key];
+    return f.showIf.in.includes(cur === undefined || cur === null ? '' : String(cur));
+}
+
+// Мини-конструктор DOM: атрибуты on* становятся обработчиками, остальное — свойствами.
+function el(tag, attrs = {}, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+        if (v === undefined || v === null || v === false) continue;
+        if (k === 'class') node.className = v;
+        else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+        else if (k in node) node[k] = v;
+        else node.setAttribute(k, v === true ? '' : v);
+    }
+    for (const c of children) {
+        if (c !== null && c !== undefined && c !== false) node.append(c);
+    }
+    return node;
+}
+
+function renderParamsForm() {
+    const root = document.getElementById('params-form');
+    if (!root) return;
+    root.replaceChildren();
+    const cls = currentClass();
+    if (!cls) return;
+    root.append(...renderFieldGroup(cls.fields || [], paramForm.params, '', 'Дополнительные параметры'));
+}
+
+// Обычные поля + раскрывающийся блок с редкими.
+function renderFieldGroup(fields, obj, path, advLabel) {
+    const out = [];
+    const basic = fields.filter(f => !f.advanced && isVisible(f, obj));
+    const adv = fields.filter(f => f.advanced && isVisible(f, obj));
+    basic.forEach(f => out.push(renderField(f, obj, path)));
+    if (adv.length) {
+        const key = path + '#adv';
+        const details = el('details', {
+            class: 'params-advanced',
+            open: paramForm.advOpen.has(key),
+            ontoggle: (e) => { e.target.open ? paramForm.advOpen.add(key) : paramForm.advOpen.delete(key); }
+        }, el('summary', {}, `${t(advLabel)} (${adv.length})`));
+        adv.forEach(f => details.append(renderField(f, obj, path)));
+        out.push(details);
+    }
+    return out;
+}
+
+function renderField(f, obj, path) {
+    if (f.type === 'list') return renderList(f, obj, path);
+
+    const id = 'pf-' + (path + f.key).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const help = f.help ? el('p', { class: 'field-help' }, f.help) : null;
+    const value = obj[f.key];
+
+    if (f.type === 'bool') {
+        const cb = el('input', {
+            type: 'checkbox', id, checked: !!value,
+            onchange: (e) => { obj[f.key] = e.target.checked; }
+        });
+        return el('div', { class: 'form-group' },
+            el('div', { class: 'checkbox-group' }, cb, el('label', { htmlFor: id }, f.title)), help);
+    }
+
+    let input;
+    if (f.type === 'enum') {
+        input = el('select', {
+            id, class: 'form-select',
+            onchange: (e) => { obj[f.key] = e.target.value; renderParamsForm(); } // могут появиться/скрыться зависимые поля
+        }, ...f.options.map(o => el('option', { value: o.value, selected: String(value ?? '') === o.value }, o.label)));
+    } else if (f.type === 'int' || f.type === 'number') {
+        input = el('input', {
+            id, type: 'number', value: value ?? '', min: f.min, max: f.max,
+            step: f.type === 'int' ? '1' : 'any',
+            placeholder: f.default !== undefined ? String(f.default) : '',
+            oninput: (e) => {
+                const v = e.target.value;
+                if (v === '') delete obj[f.key]; else obj[f.key] = Number(v);
+            }
+        });
+    } else {
+        const attrs = {
+            id, value: toEditable(value), placeholder: f.placeholder || '',
+            class: [f.type === 'text' ? 'param-text' : '', (f.regex || f.hex) ? 'mono' : ''].join(' ').trim(),
+            oninput: (e) => { obj[f.key] = e.target.value; }
+        };
+        input = f.type === 'text' ? el('textarea', { ...attrs, rows: 3 }) : el('input', { ...attrs, type: 'text' });
+        input.spellcheck = false;
+    }
+    return el('div', { class: 'form-group' }, el('label', { htmlFor: id }, f.title), input, help);
+}
+
+function listItemSummary(f, item) {
+    const s = (f.summary || []).map(k => toEditable(item[k])).filter(Boolean).join('  →  ');
+    return s.length > 70 ? s.slice(0, 69) + '…' : s;
+}
+
+function renderList(f, obj, path) {
+    const items = Array.isArray(obj[f.key]) ? obj[f.key] : (obj[f.key] = []);
+    const itemTitle = f.itemTitle || 'Элемент';
+    const box = el('div', { class: 'form-group param-list' },
+        el('div', { class: 'param-list-title' }, `${f.title} (${items.length})`),
+        f.help ? el('p', { class: 'field-help' }, f.help) : null);
+
+    items.forEach((item, i) => {
+        const summaryText = el('span', { class: 'list-item-summary' });
+        const updateSummary = () => { summaryText.textContent = listItemSummary(f, item); };
+        updateSummary();
+
+        const stop = (fn) => (e) => { e.preventDefault(); e.stopPropagation(); fn(); renderParamsForm(); };
+        const swap = (j) => () => { [items[i], items[j]] = [items[j], items[i]]; };
+
+        const details = el('details', {
+            class: 'list-item',
+            open: !paramForm.collapsed.has(item),
+            ontoggle: (e) => { e.target.open ? paramForm.collapsed.delete(item) : paramForm.collapsed.add(item); }
+        },
+            el('summary', {},
+                el('span', { class: 'list-item-num' }, `${itemTitle} ${i + 1}`),
+                summaryText,
+                el('span', { class: 'list-item-actions' },
+                    el('button', { type: 'button', class: 'icon-btn', title: 'Выше', disabled: i === 0, onclick: stop(swap(i - 1)) }, '↑'),
+                    el('button', { type: 'button', class: 'icon-btn', title: 'Ниже', disabled: i === items.length - 1, onclick: stop(swap(i + 1)) }, '↓'),
+                    el('button', { type: 'button', class: 'icon-btn danger', title: 'Удалить', onclick: stop(() => items.splice(i, 1)) }, '✕'))),
+            el('div', { class: 'list-item-body', oninput: updateSummary, onchange: updateSummary },
+                ...renderFieldGroup(f.item || [], item, `${path}${f.key}[${i}].`, 'Ещё')));
+        box.append(details);
+    });
+
+    box.append(el('button', {
+        type: 'button', class: 'btn btn-secondary btn-small',
+        onclick: () => { items.push(fillDefaults(f.item, {})); renderParamsForm(); }
+    }, `+ ${t('Добавить')}: ${itemTitle.toLowerCase()}`));
+    return box;
+}
+
+function showTrapFormError(message) {
+    const box = document.getElementById('trap-form-error');
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+
+// «invalid params: rules[0].match: …» → «Правила ответа › Правило 1 › Если клиент прислал (regex) — …»
+function humanizeParamError(message) {
+    const m = /^invalid params: ([^:]+): (.*)$/.exec(message || '');
+    if (!m) return message;
+    let fields = (currentClass() || {}).fields || [];
+    const parts = [];
+    for (const seg of m[1].split('.')) {
+        const mm = /^([^[]+)(?:\[(\d+)\])?$/.exec(seg);
+        const f = mm ? fields.find(x => x.key === mm[1]) : null;
+        parts.push(f ? f.title : seg);
+        if (mm && mm[2] !== undefined) parts.push(`${(f && f.itemTitle) || 'элемент'} ${Number(mm[2]) + 1}`);
+        fields = (f && f.item) || [];
+    }
+    return `${t('Ошибка в параметрах')}: ${parts.join(' › ')} — ${m[2]}`;
+}
+
+// Переключение «форма ⇄ JSON». Из JSON обратно — только если он корректный.
+function setParamsMode(json) {
+    const ta = document.getElementById('trap-params');
+    if (json) {
+        ta.value = JSON.stringify(paramForm.params, null, 2);
+    } else if (paramForm.jsonMode) {
+        let parsed;
+        try {
+            parsed = JSON.parse(ta.value || '{}');
+        } catch (e) {
+            showTrapFormError(t('Параметры должны быть корректным JSON.'));
+            return false;
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            showTrapFormError(t('Параметры должны быть JSON-объектом.'));
+            return false;
+        }
+        paramForm.params = fillDefaults((currentClass() || {}).fields, parsed);
+    }
+    paramForm.jsonMode = json;
+    ta.hidden = !json;
+    document.getElementById('params-form').hidden = json;
+    document.getElementById('params-mode-btn').textContent = json ? t('Вернуться к форме') : t('Редактировать как JSON');
+    showTrapFormError('');
+    if (!json) renderParamsForm();
+    return true;
+}
+
+// Сбросить в режим формы без разбора JSON (смена класса или шаблона).
+function resetParamsView() {
+    paramForm.jsonMode = true;
+    document.getElementById('trap-params').value = JSON.stringify(paramForm.params);
+    setParamsMode(false);
+}
+
 // Заполняет селект классов. Класс нельзя менять у существующей ловушки.
 function populateClassSelect(selectedClass) {
     const sel = document.getElementById('trap-class');
@@ -771,46 +1028,46 @@ function classIsMultiPort(classId) {
     return !!(c && c.multiPort);
 }
 
-function applyClassDefaults(classId) {
-    const c = state.classes.find(c => c.id === classId);
-    const help = document.getElementById('trap-class-help');
-    if (help) help.textContent = c ? c.description : '';
-
+function togglePortFields(classId) {
     const multi = classIsMultiPort(classId);
     document.getElementById('trap-port-group').style.display = multi ? 'none' : '';
     document.getElementById('trap-ports-group').style.display = multi ? '' : 'none';
-    if (c && !multi && c.defaultPort) document.getElementById('trap-port').value = c.defaultPort;
+}
 
-    // Параметры по умолчанию класса.
-    if (c && c.defaultParams) {
-        document.getElementById('trap-params').value = prettyJSON(c.defaultParams);
-    }
+function applyClassDefaults(classId) {
+    paramForm.classId = classId;
+    const c = currentClass();
+    const help = document.getElementById('trap-class-help');
+    if (help) help.textContent = c ? c.description : '';
+
+    togglePortFields(classId);
+    if (c && c.defaultPort) document.getElementById('trap-port').value = c.defaultPort;
+    if (c && c.defaultPorts) document.getElementById('trap-ports').value = c.defaultPorts;
+
+    paramForm.params = fillDefaults(c ? c.fields : [], parseParams(c && c.defaultParams));
+    paramForm.advOpen.clear();
     populatePresetSelect(classId);
+    resetParamsView();
 }
 
 function applyPreset(presetId) {
     const p = state.presets.find(p => p.presetId === presetId);
     if (!p) return;
     if (p.port) document.getElementById('trap-port').value = p.port;
-    if (p.params) document.getElementById('trap-params').value = prettyJSON(p.params);
+    if (p.ports) document.getElementById('trap-ports').value = p.ports;
+    paramForm.params = fillDefaults((currentClass() || {}).fields, parseParams(p.params));
     if (!document.getElementById('trap-name').value.trim()) {
         document.getElementById('trap-name').value = p.name;
     }
-}
-
-function prettyJSON(value) {
-    try {
-        return JSON.stringify(typeof value === 'string' ? JSON.parse(value) : value, null, 2);
-    } catch (e) {
-        return typeof value === 'string' ? value : '';
-    }
+    resetParamsView();
 }
 
 function openTrapModal(mode, trapId = null) {
     const titleEl = document.getElementById('trap-modal-title');
-    const form = document.getElementById('create-trap-form');
+    const formEl = document.getElementById('create-trap-form');
     const classSel = document.getElementById('trap-class');
     const presetGroup = document.getElementById('trap-preset-group');
+    showTrapFormError('');
 
     if (mode === 'edit' && trapId !== null) {
         const trap = state.traps.find(t => t.id === trapId);
@@ -822,18 +1079,26 @@ function openTrapModal(mode, trapId = null) {
         populateClassSelect(trap.class);
         classSel.disabled = true;            // класс менять нельзя — проще пересоздать
         if (presetGroup) presetGroup.style.display = 'none';
-        applyClassDefaults(trap.class);
+
+        paramForm.classId = trap.class;
+        const c = currentClass();
+        const help = document.getElementById('trap-class-help');
+        if (help) help.textContent = c ? c.description : '';
+        togglePortFields(trap.class);
 
         document.getElementById('trap-name').value  = trap.name || '';
         document.getElementById('trap-bind').value  = trap.bind || '0.0.0.0';
         document.getElementById('trap-port').value  = trap.port || '';
         document.getElementById('trap-ports').value = trap.ports || '';
-        document.getElementById('trap-params').value = prettyJSON(trap.params || {});
         document.getElementById('trap-active').checked = !!trap.enabled;
+
+        paramForm.params = fillDefaults(c ? c.fields : [], parseParams(trap.params));
+        paramForm.advOpen.clear();
+        resetParamsView();
     } else {
         state.editingTrapId = null;
         if (titleEl) titleEl.textContent = t('Создание новой ловушки');
-        form.reset();
+        formEl.reset();
         classSel.disabled = false;
         if (presetGroup) presetGroup.style.display = '';
         populateClassSelect();
@@ -916,25 +1181,14 @@ async function loadAndRenderEvents(trapId, { silent = false } = {}) {
 
 async function handleSubmitTrap(event) {
     event.preventDefault();
+    showTrapFormError('');
 
     const classId = document.getElementById('trap-class').value;
     const multi = classIsMultiPort(classId);
 
-    // Параметры: валидный JSON-объект.
-    const paramsRaw = document.getElementById('trap-params').value.trim();
-    let params = {};
-    if (paramsRaw) {
-        try {
-            params = JSON.parse(paramsRaw);
-        } catch (e) {
-            alert(t('Параметры должны быть корректным JSON.'));
-            return;
-        }
-        if (typeof params !== 'object' || Array.isArray(params)) {
-            alert(t('Параметры должны быть JSON-объектом.'));
-            return;
-        }
-    }
+    // В режиме JSON берём текст, иначе — объект, который правит форма.
+    if (paramForm.jsonMode && !setParamsMode(false)) return;
+    const params = paramForm.params;
 
     const payload = {
         name:    document.getElementById('trap-name').value.trim(),
@@ -949,10 +1203,7 @@ async function handleSubmitTrap(event) {
     try {
         if (state.editingTrapId !== null) {
             // класс не меняем; отправляем изменяемые поля
-            const patch = {
-                name: payload.name, bind: payload.bind,
-                params, enabled: payload.enabled
-            };
+            const patch = { name: payload.name, bind: payload.bind, params, enabled: payload.enabled };
             if (multi) patch.ports = payload.ports; else patch.port = payload.port;
             await api.updateTrap(state.editingTrapId, patch);
             closeModal('create-trap-modal');
@@ -970,7 +1221,7 @@ async function handleSubmitTrap(event) {
         const fallback = state.editingTrapId !== null
             ? 'Не удалось обновить ловушку.'
             : 'Не удалось создать ловушку.';
-        alert(getErrorMessage(err, fallback));
+        showTrapFormError(humanizeParamError(getErrorMessage(err, fallback)));
     }
 }
 
@@ -1242,6 +1493,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             const trapId = sel && sel.value ? Number(sel.value) : null;
             if (trapId) await loadAndRenderEvents(trapId);
         });
+    }
+
+    // --- Форма параметров: переключатель «форма ⇄ JSON» ---
+    const paramsModeBtn = document.getElementById('params-mode-btn');
+    if (paramsModeBtn) {
+        paramsModeBtn.addEventListener('click', () => setParamsMode(!paramForm.jsonMode));
     }
 
     // --- Форма создания: класс и шаблон ---

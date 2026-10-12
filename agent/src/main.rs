@@ -95,12 +95,28 @@ async fn main() -> ExitCode {
     }
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             eprintln!("honeyforge-agent: остановка");
         }
         _ = futures_any(handles) => {}
     }
     ExitCode::SUCCESS
+}
+
+/// Ctrl+C или SIGTERM (его шлют docker/podman/systemd при остановке).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Ждёт завершения любой из задач (если слушатель упал — выходим).

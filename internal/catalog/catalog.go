@@ -20,7 +20,9 @@ type Class struct {
 	Transport     string          `json:"transport"` // tcp | udp
 	MultiPort     bool            `json:"multiPort"`
 	DefaultPort   int             `json:"defaultPort"`
+	DefaultPorts  string          `json:"defaultPorts,omitempty"` // для многопортовых классов
 	DefaultParams json.RawMessage `json:"defaultParams"`
+	Fields        []Field         `json:"fields"` // описание параметров для формы
 }
 
 // Preset is a ready-made trap configuration (class + params).
@@ -42,7 +44,8 @@ var classes = []Class{
 	{
 		ID: "port_listener", Title: "Слушатель портов", Transport: "tcp", MultiPort: true,
 		Description:   "Открывает набор портов, логирует подключения и первые байты. Детектор сканирования: N портов от одного IP → событие scan.",
-		DefaultParams: raw(`{"ports":"9000-9003,10443","action":"read_then_close","scan_threshold":3,"scan_window_s":60}`),
+		DefaultPorts:  "9000-9003,10443",
+		DefaultParams: raw(`{"action":"read_then_close","scan_threshold":3}`),
 	},
 	{
 		ID: "banner", Title: "Баннер сервиса", Transport: "tcp", DefaultPort: 2222,
@@ -67,7 +70,7 @@ var classes = []Class{
 	{
 		ID: "honeytoken", Title: "Honeytoken (приёмник ссылок)", Transport: "tcp", DefaultPort: 8088,
 		Description:   "HTTP-приёмник ссылок-приманок: переход по уникальной ссылке → событие token.",
-		DefaultParams: raw(`{"tokens":[{"kind":"url","token":"","label":"share/finance/README.html"}],"response_body":"<html><body></body></html>"}`),
+		DefaultParams: raw(`{"tokens":[{"label":"share/finance/README.html","token":""}]}`),
 	},
 	{
 		ID: "udp", Title: "UDP-ответчик", Transport: "udp", DefaultPort: 1053,
@@ -76,10 +79,13 @@ var classes = []Class{
 	},
 }
 
-// Classes returns the trap-class catalog.
+// Classes returns the trap-class catalog with parameter schemas attached.
 func Classes() []Class {
 	out := make([]Class, len(classes))
 	copy(out, classes)
+	for i := range out {
+		out[i].Fields = Schema(out[i].ID)
+	}
 	return out
 }
 
@@ -128,6 +134,7 @@ func Presets() []Preset {
 		}
 		id := e.Name()
 		id = id[:len(id)-len(".json")]
+		params, ports := splitPorts(raw.Params)
 		out = append(out, Preset{
 			PresetID:    id,
 			Name:        raw.Name,
@@ -135,9 +142,29 @@ func Presets() []Preset {
 			Port:        raw.Port,
 			Tags:        raw.Tags,
 			Description: raw.Description,
-			Params:      raw.Params,
+			Ports:       ports,
+			Params:      params,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// splitPorts moves params.ports (prototype presets) out into the trap's own
+// ports field, where the center keeps it.
+func splitPorts(params json.RawMessage) (json.RawMessage, string) {
+	var obj map[string]any
+	if json.Unmarshal(params, &obj) != nil {
+		return params, ""
+	}
+	ports, _ := obj["ports"].(string)
+	if ports == "" {
+		return params, ""
+	}
+	delete(obj, "ports")
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return params, ""
+	}
+	return out, ports
 }

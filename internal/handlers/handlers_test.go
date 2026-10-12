@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"honeyprower/internal/auth"
@@ -103,6 +104,68 @@ func TestTrapsHandlers(t *testing.T) {
 	h.GetTrap(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 after delete, got %d", w.Code)
+	}
+}
+
+func createTrapReq(t *testing.T, h *Handlers, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/traps", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	h.CreateTrap(w, req)
+	return w
+}
+
+func TestCreateTrapParamsAgainstSchema(t *testing.T) {
+	h, _, _ := setupTestHandlers()
+
+	// Кривой regex в правиле отвергается сразу, а не молча пропускается агентом.
+	w := createTrapReq(t, h, `{"name":"x","class":"dialog","port":2121,"params":{"rules":[{"match":"(oops"}]}}`)
+	if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte("rules[0].match")) {
+		t.Fatalf("expected 400 naming rules[0].match, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Honeytoken без ID получает случайный ID.
+	w = createTrapReq(t, h, `{"name":"tok","class":"honeytoken","port":8088,"params":{"tokens":[{"label":"share/x","token":""}]}}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("honeytoken: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var ht models.Trap
+	json.NewDecoder(w.Body).Decode(&ht)
+	var hp struct {
+		Tokens []map[string]string `json:"tokens"`
+	}
+	json.Unmarshal(ht.Params, &hp)
+	if len(hp.Tokens) != 1 || len(hp.Tokens[0]["token"]) < 8 || hp.Tokens[0]["kind"] != "url" {
+		t.Fatalf("expected generated token, got %+v", hp.Tokens)
+	}
+
+	// params.ports у многопортового класса переезжает в поле ловушки.
+	w = createTrapReq(t, h, `{"name":"scan","class":"port_listener","params":{"ports":"9000-9002","action":"close"}}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("port_listener: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var pl models.Trap
+	json.NewDecoder(w.Body).Decode(&pl)
+	if pl.Ports != "9000-9002" || bytes.Contains(pl.Params, []byte("ports")) {
+		t.Fatalf("ports not moved: ports=%q params=%s", pl.Ports, pl.Params)
+	}
+
+	// PATCH параметров проверяется по схеме класса этой ловушки (honeytoken).
+	path := "/api/traps/" + strconv.FormatInt(ht.ID, 10)
+	req := httptest.NewRequest(http.MethodPatch, path, bytes.NewReader([]byte(`{"params":{"tokens":"nope"}}`)))
+	req.SetPathValue("id", strconv.FormatInt(ht.ID, 10))
+	w = httptest.NewRecorder()
+	h.UpdateTrap(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad patch params, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/traps/999", bytes.NewReader([]byte(`{"params":{}}`)))
+	req.SetPathValue("id", "999")
+	w = httptest.NewRecorder()
+	h.UpdateTrap(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing trap, got %d", w.Code)
 	}
 }
 

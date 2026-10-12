@@ -100,9 +100,28 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 		patch.Name = &name
 	}
 	if patch.Params != nil {
-		if msg := validateParams(*patch.Params); msg != "" {
+		// Схема параметров зависит от класса, поэтому сначала берём ловушку.
+		cur, err := h.Store.GetTrap(r.Context(), id)
+		if errors.Is(err, storage.ErrNotFound) {
+			httpx.WriteError(w, http.StatusNotFound, "trap not found")
+			return
+		}
+		if err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap")
+			return
+		}
+		ports := ""
+		if patch.Ports != nil {
+			ports = *patch.Ports
+		}
+		params, msg := prepareParams(cur.Class, *patch.Params, &ports)
+		if msg != "" {
 			httpx.WriteError(w, http.StatusBadRequest, msg)
 			return
+		}
+		patch.Params = &params
+		if ports != "" {
+			patch.Ports = &ports
 		}
 	}
 	if patch.Port != nil && (*patch.Port < 0 || *patch.Port > 65535) {
@@ -159,6 +178,11 @@ func validateTrap(in *models.TrapCreate) string {
 	if !ok {
 		return "unknown trap class"
 	}
+	params, msg := prepareParams(class.ID, in.Params, &in.Ports)
+	if msg != "" {
+		return msg
+	}
+	in.Params = params
 	if class.MultiPort {
 		if strings.TrimSpace(in.Ports) == "" {
 			return "ports are required for this class (e.g. 9000-9003)"
@@ -166,25 +190,68 @@ func validateTrap(in *models.TrapCreate) string {
 	} else if in.Port < 1 || in.Port > 65535 {
 		return "port must be 1..65535"
 	}
-	if msg := validateParams(in.Params); msg != "" {
-		return msg
-	}
 	return ""
 }
 
-// validateParams ensures params is a JSON object within size limits.
-func validateParams(params json.RawMessage) string {
+// prepareParams checks params against the class schema and fills values the
+// center generates itself (honeytoken IDs). For multi-port classes a
+// params.ports value moves into the trap's own ports field when that is empty.
+// Returns normalized params or an error message.
+func prepareParams(classID string, params json.RawMessage, ports *string) (json.RawMessage, string) {
 	if len(params) == 0 {
-		return ""
+		params = json.RawMessage("{}")
 	}
 	if len(params) > maxParamsBytes {
-		return "params are too large"
+		return nil, "params are too large"
 	}
 	var obj map[string]any
-	if json.Unmarshal(params, &obj) != nil {
-		return "params must be a JSON object"
+	if json.Unmarshal(params, &obj) != nil || obj == nil {
+		return nil, "params must be a JSON object"
 	}
-	return ""
+	if class, _ := catalog.ClassByID(classID); class.MultiPort {
+		if p, ok := obj["ports"].(string); ok {
+			if strings.TrimSpace(*ports) == "" {
+				*ports = p
+			}
+			delete(obj, "ports")
+		}
+	}
+	if err := catalog.ValidateParams(classID, obj); err != nil {
+		return nil, "invalid params: " + err.Error()
+	}
+	if classID == "honeytoken" {
+		if err := fillHoneytokens(obj); err != nil {
+			return nil, "failed to generate token"
+		}
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, "params must be a JSON object"
+	}
+	return out, ""
+}
+
+// fillHoneytokens gives every link without an ID a random one: the agent can
+// only recognise a hit by a non-empty token.
+func fillHoneytokens(obj map[string]any) error {
+	tokens, _ := obj["tokens"].([]any)
+	for _, it := range tokens {
+		t, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if s, _ := t["token"].(string); strings.TrimSpace(s) == "" {
+			b := make([]byte, 8)
+			if _, err := rand.Read(b); err != nil {
+				return err
+			}
+			t["token"] = hex.EncodeToString(b)
+		}
+		if _, ok := t["kind"]; !ok {
+			t["kind"] = "url"
+		}
+	}
+	return nil
 }
 
 func genToken() (string, error) {
