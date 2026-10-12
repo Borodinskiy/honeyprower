@@ -35,6 +35,14 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to create token")
 		return
 	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   7 * 24 * 3600,
+	})
 	httpx.WriteJSON(w, http.StatusOK, models.AuthResponse{Token: token, User: user})
 }
 
@@ -75,7 +83,37 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to create token")
 		return
 	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   7 * 24 * 3600,
+	})
 	httpx.WriteJSON(w, http.StatusOK, models.AuthResponse{Token: token, User: user})
+}
+
+func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
+	var token string
+	if c, err := r.Cookie("session_token"); err == nil {
+		token = strings.TrimSpace(c.Value)
+	}
+	if token == "" {
+		token = middleware.BearerToken(r)
+	}
+	if token != "" {
+		h.Auth.Revoke(token)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
 }
 
 func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {

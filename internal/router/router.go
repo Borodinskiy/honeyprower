@@ -17,6 +17,7 @@ func NewAPI(h *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	// --- public ---
 	mux.HandleFunc("POST /api/auth/login", h.Login)
 	mux.HandleFunc("POST /api/auth/register", h.Register)
+	mux.HandleFunc("POST /api/auth/logout", h.Logout)
 
 	// --- authenticated ---
 	mux.Handle("GET /api/auth/me", requireAuth(http.HandlerFunc(h.Me)))

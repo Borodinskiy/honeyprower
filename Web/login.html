@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход в систему</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="dark-theme login-page">
+    <div class="login-wrapper">
+        <div class="auth-card">
+            <div class="login-logo">
+                <span>🌐</span>
+                <span>HoneyForge</span>
+            </div>
+
+            <div id="auth-error" class="auth-error-message" style="display: none;"></div>
+
+            <div id="login-form" class="auth-form active">
+                <h2>Вход в систему</h2>
+                <form id="login-form-el">
+                    <div class="form-group">
+                        <label>Логин</label>
+                        <input type="text" name="username" required placeholder="Введите логин" autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label>Пароль</label>
+                        <input type="password" name="password" required placeholder="Введите пароль" autocomplete="current-password">
+                    </div>
+                    <button type="submit" class="btn btn-success full-width">Войти</button>
+                </form>
+                <p class="auth-switch"><span>Нет аккаунта?</span> <a href="#" data-switch-form="register">Зарегистрироваться</a></p>
+            </div>
+
+            <div id="register-form" class="auth-form">
+                <h2>Регистрация</h2>
+                <form id="register-form-el">
+                    <div class="form-group">
+                        <label>Логин</label>
+                        <input type="text" name="username" required placeholder="Придумайте логин" autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" name="email" required placeholder="Введите email" autocomplete="email">
+                    </div>
+                    <div class="form-group">
+                        <label>Пароль</label>
+                        <input type="password" name="password" required placeholder="Придумайте пароль" autocomplete="new-password">
+                    </div>
+                    <button type="submit" class="btn btn-success full-width">Зарегистрироваться</button>
+                </form>
+                <p class="auth-switch"><span>Уже есть аккаунт?</span> <a href="#" data-switch-form="login">Войти</a></p>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

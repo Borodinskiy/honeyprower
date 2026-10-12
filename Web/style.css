@@ -488,7 +488,7 @@ body.dark-theme {
     --text-muted: #a0aec0;
     --border-color: #4a5568;
     --white: #2d3748;
-    
+
     background-color: var(--bg-body);
     color: var(--text-main);
 }
@@ -579,3 +579,50 @@ body.dark-theme .event-item {
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
 }
 body.dark-theme .event-type { color: var(--color-accent); }
+
+/* --- Стили для страницы логина (login.html) --- */
+.login-page {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+    background-color: var(--bg-body);
+}
+
+.login-wrapper {
+    width: 100%;
+    max-width: 420px;
+    margin: 0 auto;
+}
+
+.auth-card {
+    background: var(--white);
+    padding: 35px 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+}
+
+.login-logo {
+    text-align: center;
+    font-size: 26px;
+    font-weight: bold;
+    color: var(--color-accent);
+    margin-bottom: 25px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.auth-error-message {
+    background-color: rgba(220, 38, 38, 0.15);
+    border: 1px solid var(--color-danger);
+    color: #ef4444;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 14px;
+    margin-bottom: 18px;
+    text-align: center;
+}
