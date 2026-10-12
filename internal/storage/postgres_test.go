@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -15,19 +14,43 @@ func TestStorageInterfaces(t *testing.T) {
 	var _ Storage = (*Memory)(nil)
 }
 
-func TestFormatLastEvent(t *testing.T) {
-	// Null time should return em-dash
-	nullTime := sql.NullTime{Valid: false}
-	if got := formatLastEvent(nullTime); got != "—" {
-		t.Errorf("formatLastEvent(invalid) = %q; want \"—\"", got)
+func TestFormatTS(t *testing.T) {
+	if got := formatTS(0); got != "—" {
+		t.Errorf("formatTS(0) = %q; want em-dash", got)
 	}
+	// 2024-05-20 14:30:45 UTC
+	ts := float64(time.Date(2024, time.May, 20, 14, 30, 45, 0, time.UTC).Unix())
+	if got := formatTS(ts); got != "2024-05-20 14:30:45" {
+		t.Errorf("formatTS = %q; want 2024-05-20 14:30:45", got)
+	}
+}
 
-	// Valid time should return formatted string "YYYY-MM-DD HH:MM:SS"
-	fixedTime := time.Date(2024, time.May, 20, 14, 30, 45, 0, time.UTC)
-	validTime := sql.NullTime{Time: fixedTime, Valid: true}
-	want := "2024-05-20 14:30:45"
-	if got := formatLastEvent(validTime); got != want {
-		t.Errorf("formatLastEvent(valid) = %q; want %q", got, want)
+func TestTrapStatus(t *testing.T) {
+	now := time.Now()
+	if got := trapStatus(nil, now); got != "never" {
+		t.Errorf("nil last-seen -> %q; want never", got)
+	}
+	recent := now.Add(-10 * time.Second)
+	if got := trapStatus(&recent, now); got != "online" {
+		t.Errorf("recent -> %q; want online", got)
+	}
+	old := now.Add(-10 * time.Minute)
+	if got := trapStatus(&old, now); got != "offline" {
+		t.Errorf("old -> %q; want offline", got)
+	}
+}
+
+func TestIsWarning(t *testing.T) {
+	for _, tc := range []struct {
+		typ  string
+		want bool
+	}{
+		{"auth", true}, {"scan", true}, {"token", true},
+		{"connect", false}, {"data", false}, {"request", false},
+	} {
+		if got := isWarning(tc.typ); got != tc.want {
+			t.Errorf("isWarning(%q) = %v; want %v", tc.typ, got, tc.want)
+		}
 	}
 }
 
@@ -37,44 +60,13 @@ func TestIsUniqueViolation(t *testing.T) {
 		err      error
 		expected bool
 	}{
-		{
-			name:     "nil error",
-			err:      nil,
-			expected: false,
-		},
-		{
-			name: "pgconn PgError 23505",
-			err: &pgconn.PgError{
-				Code:    "23505",
-				Message: "duplicate key value violates unique constraint",
-			},
-			expected: true,
-		},
-		{
-			name: "pgconn PgError foreign key violation 23503",
-			err: &pgconn.PgError{
-				Code:    "23503",
-				Message: "foreign key violation",
-			},
-			expected: false,
-		},
-		{
-			name:     "standard error with 23505 in text",
-			err:      errors.New("pq: duplicate key value violates unique constraint (23505)"),
-			expected: true,
-		},
-		{
-			name:     "standard error with duplicate key value",
-			err:      errors.New("ERROR: duplicate key value violates unique constraint \"users_username_key\""),
-			expected: true,
-		},
-		{
-			name:     "unrelated error",
-			err:      errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
-			expected: false,
-		},
+		{"nil error", nil, false},
+		{"pgconn 23505", &pgconn.PgError{Code: "23505", Message: "duplicate key"}, true},
+		{"pgconn 23503", &pgconn.PgError{Code: "23503", Message: "fk violation"}, false},
+		{"text 23505", errors.New("pq: ... (23505)"), true},
+		{"text duplicate", errors.New("ERROR: duplicate key value violates ..."), true},
+		{"unrelated", errors.New("connection refused"), false},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isUniqueViolation(tc.err); got != tc.expected {
@@ -87,8 +79,6 @@ func TestIsUniqueViolation(t *testing.T) {
 func TestNewPostgresConnectionFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-
-	// Connect to non-listening port with immediate timeout
 	dsn := "postgres://postgres:postgres@127.0.0.1:59999/honeyforge?sslmode=disable&connect_timeout=1"
 	store, err := NewPostgres(ctx, dsn)
 	if err == nil {

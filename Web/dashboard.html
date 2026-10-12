@@ -83,6 +83,18 @@
             <div class="events-toolbar">
                 <label for="events-trap-select">Ловушка:</label>
                 <select id="events-trap-select" class="form-select"></select>
+                <label for="events-type-select">Тип:</label>
+                <select id="events-type-select" class="form-select">
+                    <option value="">Все</option>
+                    <option value="connect">Подключение</option>
+                    <option value="auth">Вход</option>
+                    <option value="command">Команда</option>
+                    <option value="request">HTTP-запрос</option>
+                    <option value="scan">Сканирование</option>
+                    <option value="token">Honeytoken</option>
+                    <option value="data">Данные</option>
+                    <option value="handshake">Рукопожатие</option>
+                </select>
             </div>
 
             <div id="events-list" class="events-list"></div>
@@ -102,27 +114,71 @@
                 </div>
 
                 <div class="form-group">
-                    <label>Тип ловушки</label>
-                    <select id="trap-type" class="form-select" required>
-                        <option value="SSH">SSH</option>
-                        <option value="Web">Web</option>
-                        <option value="FTP">FTP</option>
-                        <option value="RDP">RDP</option>
+                    <label>Класс ловушки</label>
+                    <select id="trap-class" class="form-select" required></select>
+                    <p class="field-help" id="trap-class-help"></p>
+                </div>
+
+                <div class="form-group" id="trap-preset-group">
+                    <label>Шаблон (необязательно)</label>
+                    <select id="trap-preset" class="form-select">
+                        <option value="">— Без шаблона —</option>
                     </select>
                 </div>
 
                 <div class="form-group">
-                    <label>IP-адрес или URL</label>
-                    <input type="text" id="trap-target" required placeholder="192.168.1.10:22 или http://10.0.0.5/">
+                    <label>Адрес (bind)</label>
+                    <input type="text" id="trap-bind" value="0.0.0.0" placeholder="0.0.0.0">
+                </div>
+
+                <div class="form-group" id="trap-port-group">
+                    <label>Порт</label>
+                    <input type="number" id="trap-port" min="1" max="65535" placeholder="2222">
+                </div>
+
+                <div class="form-group" id="trap-ports-group" style="display:none;">
+                    <label>Порты (через запятую, диапазоны через дефис)</label>
+                    <input type="text" id="trap-ports" placeholder="9000-9003,10443">
+                </div>
+
+                <div class="form-group">
+                    <label>Параметры (JSON)</label>
+                    <textarea id="trap-params" class="code-input" rows="8" spellcheck="false"></textarea>
+                    <p class="field-help">Шаблон задаёт параметры; при желании отредактируйте JSON.</p>
                 </div>
 
                 <div class="form-group checkbox-group">
                     <input type="checkbox" id="trap-active" checked>
-                    <label for="trap-active">Активна</label>
+                    <label for="trap-active">Запущена (агент должен работать)</label>
                 </div>
 
                 <button type="submit" class="btn btn-success full-width">Сохранить</button>
             </form>
+        </div>
+    </div>
+
+    <!-- МОДАЛЬНОЕ ОКНО «ЛОВУШКА СОЗДАНА»: как запустить агента -->
+    <div id="trap-created-modal" class="modal-overlay">
+        <div class="modal-content">
+            <span class="close-btn" data-close-modal="trap-created-modal">&times;</span>
+            <h2>Ловушка готова к запуску</h2>
+            <p class="field-help">Конфиг едет вместе с бинарником агента. Из центра к агенту ничего не идёт: чтобы изменить ловушку — обновите её здесь и перезапустите агент с новым конфигом.</p>
+
+            <ol class="run-steps">
+                <li>Соберите агент один раз: <code>cd agent &amp;&amp; cargo build --release</code></li>
+                <li>Скачайте конфиг и положите рядом с бинарником.</li>
+                <li>Запустите: <code>./honeyforge-agent config.json</code></li>
+            </ol>
+
+            <div class="form-group">
+                <label>Токен ловушки</label>
+                <input type="text" id="created-token" readonly>
+            </div>
+
+            <div class="traps-actions">
+                <a id="download-config-btn" class="btn btn-success" href="#" download>Скачать config.json</a>
+                <a id="download-bundle-btn" class="btn btn-secondary" href="#" download>Скачать .zip (конфиг + инструкция)</a>
+            </div>
         </div>
     </div>
 

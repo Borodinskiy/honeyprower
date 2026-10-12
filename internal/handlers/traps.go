@@ -1,15 +1,24 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"honeyprower/internal/catalog"
 	"honeyprower/internal/httpx"
 	"honeyprower/internal/models"
 	"honeyprower/internal/storage"
+)
+
+const (
+	maxTrapNameLen = 255
+	maxParamsBytes = 256 * 1024
 )
 
 func (h *Handlers) ListTraps(w http.ResponseWriter, r *http.Request) {
@@ -27,17 +36,26 @@ func (h *Handlers) CreateTrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Name = strings.TrimSpace(in.Name)
-	in.Type = strings.TrimSpace(in.Type)
-	in.Target = strings.TrimSpace(in.Target)
-	if in.Name == "" || in.Type == "" || in.Target == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "name, type and target are required")
-		return
+	in.Class = strings.TrimSpace(in.Class)
+	in.Bind = strings.TrimSpace(in.Bind)
+	if in.Bind == "" {
+		in.Bind = "0.0.0.0"
 	}
-	if msg := validateTrapFields(&in.Name, &in.Type, &in.Target); msg != "" {
+	if msg := validateTrap(&in); msg != "" {
 		httpx.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
-	trap, err := h.Store.CreateTrap(r.Context(), in)
+
+	token, err := genToken()
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+	trap, err := h.Store.CreateTrap(r.Context(), in, token)
+	if errors.Is(err, storage.ErrAlreadyExists) {
+		httpx.WriteError(w, http.StatusConflict, "trap token collision, retry")
+		return
+	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to create trap")
 		return
@@ -73,18 +91,22 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &patch) {
 		return
 	}
-	for _, f := range []*string{patch.Name, patch.Type, patch.Target} {
-		if f == nil {
-			continue
+	if patch.Name != nil {
+		name := strings.TrimSpace(*patch.Name)
+		if name == "" || utf8.RuneCountInString(name) > maxTrapNameLen {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid name")
+			return
 		}
-		*f = strings.TrimSpace(*f)
-		if *f == "" {
-			httpx.WriteError(w, http.StatusBadRequest, "name, type and target must not be empty")
+		patch.Name = &name
+	}
+	if patch.Params != nil {
+		if msg := validateParams(*patch.Params); msg != "" {
+			httpx.WriteError(w, http.StatusBadRequest, msg)
 			return
 		}
 	}
-	if msg := validateTrapFields(patch.Name, patch.Type, patch.Target); msg != "" {
-		httpx.WriteError(w, http.StatusBadRequest, msg)
+	if patch.Port != nil && (*patch.Port < 0 || *patch.Port > 65535) {
+		httpx.WriteError(w, http.StatusBadRequest, "port out of range")
 		return
 	}
 	trap, err := h.Store.UpdateTrap(r.Context(), id, patch)
@@ -113,28 +135,64 @@ func (h *Handlers) DeleteTrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to delete trap")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent) // 204 — script.js already handles this
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func parseID(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }
+// Classes serves the trap-class catalog that drives the create form.
+func (h *Handlers) Classes(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, catalog.Classes())
+}
 
-// Ограничения длины совпадают с размерами колонок в migrations/001_schema.sql.
-const (
-	maxTrapNameLen   = 255
-	maxTrapTypeLen   = 50
-	maxTrapTargetLen = 255
-)
+// Presets serves ready-made trap configurations.
+func (h *Handlers) Presets(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, catalog.Presets())
+}
 
-// validateTrapFields проверяет длину непустых полей; nil-поля пропускаются.
-// Возвращает текст ошибки или "".
-func validateTrapFields(name, typ, target *string) string {
-	switch {
-	case name != nil && utf8.RuneCountInString(*name) > maxTrapNameLen:
+func validateTrap(in *models.TrapCreate) string {
+	if in.Name == "" {
+		return "name is required"
+	}
+	if utf8.RuneCountInString(in.Name) > maxTrapNameLen {
 		return "name is too long"
-	case typ != nil && utf8.RuneCountInString(*typ) > maxTrapTypeLen:
-		return "type is too long"
-	case target != nil && utf8.RuneCountInString(*target) > maxTrapTargetLen:
-		return "target is too long"
+	}
+	class, ok := catalog.ClassByID(in.Class)
+	if !ok {
+		return "unknown trap class"
+	}
+	if class.MultiPort {
+		if strings.TrimSpace(in.Ports) == "" {
+			return "ports are required for this class (e.g. 9000-9003)"
+		}
+	} else if in.Port < 1 || in.Port > 65535 {
+		return "port must be 1..65535"
+	}
+	if msg := validateParams(in.Params); msg != "" {
+		return msg
 	}
 	return ""
 }
+
+// validateParams ensures params is a JSON object within size limits.
+func validateParams(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	if len(params) > maxParamsBytes {
+		return "params are too large"
+	}
+	var obj map[string]any
+	if json.Unmarshal(params, &obj) != nil {
+		return "params must be a JSON object"
+	}
+	return ""
+}
+
+func genToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func parseID(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }

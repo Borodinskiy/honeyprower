@@ -10,6 +10,8 @@ type Handlers struct {
 	Auth  *auth.Manager
 	// AllowRegistration разрешает самостоятельную регистрацию через /api/auth/register.
 	AllowRegistration bool
+	// PublicURL — внешний адрес центра для агентов (в config.json). Пусто — берётся из запроса.
+	PublicURL string
 }
 
 func New(s storage.Storage, a *auth.Manager) *Handlers {

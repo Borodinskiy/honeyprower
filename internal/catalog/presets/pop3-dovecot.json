@@ -1,0 +1,64 @@
+{
+  "name": "POP3 (Dovecot)",
+  "class": "dialog",
+  "port": 1110,
+  "tags": [
+    "pop3",
+    "mail",
+    "auth"
+  ],
+  "description": "POP3: USER/PASS захват. Реальный порт 110.",
+  "params": {
+    "greeting": "+OK Dovecot (Ubuntu) ready.\\r\\n",
+    "default_response": "-ERR Unknown command.\\r\\n",
+    "rules": [
+      {
+        "state": "*",
+        "match": "^CAPA",
+        "response": "+OK\\r\\nCAPA\\r\\nTOP\\r\\nUIDL\\r\\nRESP-CODES\\r\\nPIPELINING\\r\\nAUTH-RESP-CODE\\r\\nUSER\\r\\nSASL PLAIN\\r\\n.\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^USER\\s+(.*)$",
+        "response": "+OK\\r\\n",
+        "capture": "username",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^PASS\\s+(.*)$",
+        "response": "-ERR [AUTH] Authentication failed.\\r\\n",
+        "capture": "password",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^QUIT",
+        "response": "+OK Logging out\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": true,
+        "log": true
+      }
+    ]
+  },
+  "probe": [
+    "USER admin",
+    "PASS 123456",
+    "QUIT"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

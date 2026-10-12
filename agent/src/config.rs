@@ -18,6 +18,9 @@ pub struct Config {
     /// Через сколько секунд повторять отправку, если центр недоступен.
     #[serde(default = "default_retry")]
     pub retry_interval_s: u64,
+    /// Период heartbeat'а (обновляет "last seen" в центре). 0 — выключить.
+    #[serde(default = "default_heartbeat")]
+    pub heartbeat_interval_s: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,10 +49,16 @@ fn default_bind() -> String {
 fn default_retry() -> u64 {
     10
 }
+fn default_heartbeat() -> u64 {
+    30
+}
 
 impl Config {
     pub fn ingest_url(&self) -> String {
         format!("{}/api/ingest", self.center_url.trim_end_matches('/'))
+    }
+    pub fn heartbeat_url(&self) -> String {
+        format!("{}/api/heartbeat", self.center_url.trim_end_matches('/'))
     }
 }
 

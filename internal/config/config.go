@@ -14,7 +14,8 @@ type Config struct {
 	StaticDir string // путь до директории, в которой находятся файлы фронтэнда
 	DBDSN     string // DSN подключение к базе данных PostgreSQL
 
-	AllowRegistration bool // разрешена ли самостоятельная регистрация операторов
+	AllowRegistration bool   // разрешена ли самостоятельная регистрация операторов
+	PublicURL         string // внешний адрес центра для агентов (в config.json); пусто — из запроса
 }
 
 // TODO: чтение конфигурационных файлов помимо переменных окружения
@@ -27,6 +28,7 @@ func Load() *Config {
 		DBDSN:     getDBDSN(),
 
 		AllowRegistration: getbool("ALLOW_REGISTRATION", true),
+		PublicURL:         os.Getenv("PUBLIC_URL"),
 	}
 }
 

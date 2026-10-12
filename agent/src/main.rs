@@ -51,6 +51,7 @@ async fn main() -> ExitCode {
 
     let buffer_path = PathBuf::from(format!("{cfg_path}.buffer"));
     let sink = sender::start(cfg.clone(), buffer_path);
+    sender::start_heartbeat(cfg.clone());
 
     let ports = trap.ports(&cfg.trap);
     if ports.is_empty() || (ports.len() == 1 && ports[0] == 0) {

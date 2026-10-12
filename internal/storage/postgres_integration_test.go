@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,15 +14,14 @@ import (
 	"honeyprower/internal/models"
 )
 
-// newTestPostgres подключается к TEST_DB_DSN и работает в отдельной временной схеме,
-// которая удаляется после теста. Без TEST_DB_DSN тест пропускается.
+// newTestPostgres connects to TEST_DB_DSN in its own temporary schema, dropped
+// after the test. Without TEST_DB_DSN the test is skipped.
 func newTestPostgres(t *testing.T) (*Postgres, string) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DB_DSN")
 	if dsn == "" {
 		t.Skip("TEST_DB_DSN not set, skipping PostgreSQL integration test")
 	}
-
 	ctx := context.Background()
 	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -35,10 +35,9 @@ func newTestPostgres(t *testing.T) (*Postgres, string) {
 		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
 		_ = admin.Close()
 	})
-
 	u, err := url.Parse(dsn)
 	if err != nil {
-		t.Fatalf("parse TEST_DB_DSN (must be a URL): %v", err)
+		t.Fatalf("parse TEST_DB_DSN: %v", err)
 	}
 	q := u.Query()
 	q.Set("search_path", schema)
@@ -56,73 +55,93 @@ func TestPostgresIntegration(t *testing.T) {
 	p, dsn := newTestPostgres(t)
 	ctx := context.Background()
 
-	// Повторная инициализация не должна падать и дублировать сид.
+	// Re-init must be idempotent (no duplicate seed).
 	p2, err := NewPostgres(ctx, dsn)
 	if err != nil {
 		t.Fatalf("second NewPostgres: %v", err)
 	}
 	_ = p2.Close()
 
-	traps, err := p.ListTraps(ctx)
-	if err != nil {
-		t.Fatalf("ListTraps: %v", err)
-	}
-	if len(traps) != 3 {
-		t.Fatalf("expected 3 seeded traps, got %d", len(traps))
-	}
-
+	// Seed has admin user + one example trap.
 	admin, err := p.GetUserByUsername(ctx, "ADMIN")
-	if err != nil {
-		t.Fatalf("GetUserByUsername(ADMIN): %v", err)
+	if err != nil || admin.Username != "admin" {
+		t.Fatalf("seed admin: %+v, %v", admin, err)
 	}
-	if admin.Username != "admin" {
-		t.Fatalf("unexpected user: %+v", admin)
+	traps, err := p.ListTraps(ctx)
+	if err != nil || len(traps) != 2 {
+		t.Fatalf("expected 2 seeded traps, got %d (%v)", len(traps), err)
+	}
+	if traps[0].Class != "banner" || traps[0].Status != "never" {
+		t.Fatalf("unexpected seeded trap: %+v", traps[0])
+	}
+	if traps[1].Class != "dialog" {
+		t.Fatalf("expected second seeded trap to be dialog, got %+v", traps[1])
 	}
 
-	// Логин уникален без учёта регистра.
-	_, err = p.CreateUser(ctx, &models.User{Username: "Admin", Email: "x@example.com", PasswordHash: "h"})
-	if !errors.Is(err, ErrAlreadyExists) {
-		t.Fatalf("expected ErrAlreadyExists for 'Admin', got %v", err)
-	}
-
-	// CRUD ловушки.
-	created, err := p.CreateTrap(ctx, models.TrapCreate{Name: "T", Type: "SSH", Target: "10.0.0.1:22", Active: true})
+	// Create a trap and ingest events against it.
+	created, err := p.CreateTrap(ctx, models.TrapCreate{
+		Name: "FTP", Class: "dialog", Bind: "0.0.0.0", Port: 2121,
+		Params: json.RawMessage(`{"greeting":"220 ok\r\n"}`), Enabled: true,
+	}, "tok-pg-1")
 	if err != nil {
 		t.Fatalf("CreateTrap: %v", err)
 	}
 	if created.LastEventAt != "—" {
 		t.Fatalf("expected no last event, got %q", created.LastEventAt)
 	}
-	off := false
-	updated, err := p.UpdateTrap(ctx, created.ID, models.TrapPatch{Active: &off})
-	if err != nil || updated.Active {
-		t.Fatalf("UpdateTrap: %+v, %v", updated, err)
-	}
-	if _, err := p.UpdateTrap(ctx, 999999, models.TrapPatch{Active: &off}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected ErrNotFound on update, got %v", err)
+
+	// Duplicate token -> ErrAlreadyExists
+	if _, err := p.CreateTrap(ctx, models.TrapCreate{Name: "x", Class: "banner", Port: 1}, "tok-pg-1"); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("expected ErrAlreadyExists for dup token, got %v", err)
 	}
 
-	stats, err := p.GetStats(ctx)
-	if err != nil {
-		t.Fatalf("GetStats: %v", err)
+	byTok, err := p.GetTrapByToken(ctx, "tok-pg-1")
+	if err != nil || byTok.ID != created.ID {
+		t.Fatalf("GetTrapByToken: %+v, %v", byTok, err)
 	}
-	if stats.ActiveTraps != 2 || stats.Warnings24h != 229 {
+
+	user, pass := "root", "toor"
+	for _, ev := range []models.IngestEvent{
+		{EventType: "connect", SrcIP: "203.0.113.5", TS: 1700000000},
+		{EventType: "auth", SrcIP: "203.0.113.5", Username: &user, Password: &pass, TS: float64(time.Now().Unix())},
+	} {
+		if _, err := p.InsertEvent(ctx, created.ID, ev); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+	}
+	if _, err := p.InsertEvent(ctx, 999999, models.IngestEvent{EventType: "connect"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound ingesting to missing trap, got %v", err)
+	}
+
+	got, _ := p.GetTrap(ctx, created.ID)
+	if got.TotalEvents != 2 || got.Warnings != 1 || got.Status != "online" {
+		t.Fatalf("derived fields wrong: events=%d warnings=%d status=%s", got.TotalEvents, got.Warnings, got.Status)
+	}
+
+	// Filter events
+	auths, err := p.ListEvents(ctx, models.EventFilter{TrapID: created.ID, EventType: "auth"})
+	if err != nil || len(auths) != 1 || auths[0].Username == nil || *auths[0].Username != "root" {
+		t.Fatalf("auth filter: %+v, %v", auths, err)
+	}
+	bySrc, _ := p.ListEvents(ctx, models.EventFilter{SrcIP: "203.0.113.5"})
+	if len(bySrc) != 2 {
+		t.Fatalf("expected 2 by src, got %d", len(bySrc))
+	}
+
+	stats, _ := p.GetStats(ctx)
+	if stats.TotalEvents != 2 || stats.Warnings24h != 1 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 
-	// Удаление ловушки каскадно удаляет её события.
-	events, err := p.ListEvents(ctx, traps[0].ID)
-	if err != nil || len(events) != 3 {
-		t.Fatalf("ListEvents: %d, %v", len(events), err)
-	}
-	if err := p.DeleteTrap(ctx, traps[0].ID); err != nil {
+	// Delete cascades events.
+	if err := p.DeleteTrap(ctx, created.ID); err != nil {
 		t.Fatalf("DeleteTrap: %v", err)
 	}
-	if _, err := p.ListEvents(ctx, traps[0].ID); !errors.Is(err, ErrNotFound) {
+	if _, err := p.ListEvents(ctx, models.EventFilter{TrapID: created.ID}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for events of deleted trap, got %v", err)
 	}
 	var left int
-	if err := p.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE trap_id = $1", traps[0].ID).Scan(&left); err != nil || left != 0 {
-		t.Fatalf("expected events to be cascaded, left=%d err=%v", left, err)
+	if err := p.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE trap_id = $1", created.ID).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("expected cascaded events, left=%d err=%v", left, err)
 	}
 }

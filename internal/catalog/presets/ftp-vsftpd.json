@@ -1,0 +1,85 @@
+{
+  "name": "FTP (vsftpd 3.0.5)",
+  "class": "dialog",
+  "port": 2121,
+  "tags": [
+    "ftp",
+    "auth"
+  ],
+  "description": "FTP: USER/PASS захват, ответы как у vsftpd. Реальный порт 21.",
+  "params": {
+    "greeting": "220 (vsFTPd 3.0.5)\\r\\n",
+    "decoder": "line",
+    "default_response": "530 Please login with USER and PASS.\\r\\n",
+    "rules": [
+      {
+        "state": "*",
+        "match": "^USER\\s+(.*)$",
+        "response": "331 Please specify the password.\\r\\n",
+        "capture": "username",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^PASS\\s?(.*)$",
+        "response": "530 Login incorrect.\\r\\n",
+        "capture": "password",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^SYST",
+        "response": "215 UNIX Type: L8\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^FEAT",
+        "response": "211-Features:\\r\\n EPRT\\r\\n EPSV\\r\\n MDTM\\r\\n PASV\\r\\n REST STREAM\\r\\n SIZE\\r\\n TVFS\\r\\n211 End\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^AUTH\\s+(TLS|SSL)",
+        "response": "530 Please login with USER and PASS.\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^QUIT",
+        "response": "221 Goodbye.\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": true,
+        "log": true
+      }
+    ]
+  },
+  "probe": [
+    "USER admin",
+    "PASS 123456",
+    "SYST",
+    "QUIT"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

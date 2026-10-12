@@ -83,6 +83,26 @@ pub fn start(cfg: Config, buffer_path: PathBuf) -> EventSink {
     EventSink { tx }
 }
 
+/// Периодический heartbeat: обновляет "last seen" ловушки в центре между
+/// атаками, чтобы на дашборде был виден статус online (FR-A3).
+pub fn start_heartbeat(cfg: Config) {
+    if cfg.heartbeat_interval_s == 0 {
+        return;
+    }
+    thread::spawn(move || {
+        let agent = build_agent(cfg.verify_tls);
+        let url = cfg.heartbeat_url();
+        let period = Duration::from_secs(cfg.heartbeat_interval_s);
+        loop {
+            let _ = agent
+                .post(&url)
+                .set("X-HF-Token", &cfg.token)
+                .send_string("");
+            thread::sleep(period);
+        }
+    });
+}
+
 fn build_agent(_verify_tls: bool) -> ureq::Agent {
     // http и https с доверенным сертификатом. Самоподписанный TLS центра —
     // отдельный шаг (маскировка канала), пока его не трогаем.

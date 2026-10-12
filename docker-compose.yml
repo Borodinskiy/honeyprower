@@ -14,6 +14,7 @@ services:
       timeout: 3s
       retries: 20
 
+  # Центр управления: сайт оператора + API + приём телеметрии.
   app:
     build: .
     restart: unless-stopped
@@ -29,6 +30,30 @@ services:
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
     ports:
       - "${WEB_PORT:-8080}:8080"
+
+  # Демо-ловушка low: SSH-баннер. Агент на Rust, конфиг едет с ним.
+  ssh-trap:
+    build:
+      context: ./agent
+    restart: unless-stopped
+    depends_on:
+      - app
+    volumes:
+      - ./deploy/agent-configs/ssh.json:/config/config.json:ro,Z
+    ports:
+      - "${SSH_TRAP_PORT:-2222}:2222"
+
+  # Демо-ловушка medium: fake-FTP с захватом логинов/паролей.
+  ftp-trap:
+    build:
+      context: ./agent
+    restart: unless-stopped
+    depends_on:
+      - app
+    volumes:
+      - ./deploy/agent-configs/ftp.json:/config/config.json:ro,Z
+    ports:
+      - "${FTP_TRAP_PORT:-2121}:2121"
 
 volumes:
   pgdata:

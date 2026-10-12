@@ -34,6 +34,7 @@ func main() {
 	authMgr := auth.NewManager()
 	h := handlers.New(store, authMgr)
 	h.AllowRegistration = cfg.AllowRegistration
+	h.PublicURL = cfg.PublicURL
 	if !cfg.AllowRegistration {
 		log.Println("self-registration is disabled (ALLOW_REGISTRATION=false)")
 	}

@@ -1,0 +1,57 @@
+{
+  "name": "Telnet (BusyBox / IoT)",
+  "class": "dialog",
+  "port": 2323,
+  "tags": [
+    "telnet",
+    "iot",
+    "auth"
+  ],
+  "description": "Telnet-логин IoT-устройства: login:/Password:, захват пар как у Mirai-брутфорса. Реальный порт 23.",
+  "params": {
+    "hostname": "DVR",
+    "decoder": "telnet",
+    "greeting": "\\xff\\xfb\\x01\\xff\\xfb\\x03\\r\\n{hostname} login: ",
+    "default_response": "",
+    "max_commands": 30,
+    "rules": [
+      {
+        "state": "start",
+        "match": "^(.+)$",
+        "response": "Password: ",
+        "capture": "username",
+        "decode": "",
+        "next_state": "pass",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "pass",
+        "match": "^(.*)$",
+        "response": "\\r\\nLogin incorrect\\r\\n\\r\\n{hostname} login: ",
+        "capture": "password",
+        "decode": "",
+        "next_state": "start",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "start",
+        "match": "^$",
+        "response": "{hostname} login: ",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": false
+      }
+    ]
+  },
+  "probe": [
+    "root",
+    "admin",
+    "uname -a"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

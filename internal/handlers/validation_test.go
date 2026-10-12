@@ -7,8 +7,13 @@ import (
 	"testing"
 
 	"honeyprower/internal/httpx"
+	"honeyprower/internal/models"
 	"honeyprower/internal/router"
 )
+
+func modelsTrap() models.TrapCreate {
+	return models.TrapCreate{Name: "T", Class: "banner", Bind: "0.0.0.0", Port: 2222}
+}
 
 func TestInputValidation(t *testing.T) {
 	h, authMgr, _ := setupTest(t)
@@ -30,10 +35,12 @@ func TestInputValidation(t *testing.T) {
 		{"register bad email", "POST", "/api/auth/register", `{"username":"u1","email":"nope","password":"secret1"}`, false, http.StatusBadRequest},
 		{"register case-insensitive duplicate", "POST", "/api/auth/register", `{"username":"ADMIN","email":"a@example.com","password":"secret1"}`, false, http.StatusConflict},
 		{"login unknown user", "POST", "/api/auth/login", `{"username":"ghost","password":"whatever"}`, false, http.StatusUnauthorized},
-		{"create trap long name", "POST", "/api/traps", `{"name":"` + long + `","type":"SSH","target":"1.2.3.4:22"}`, true, http.StatusBadRequest},
-		{"create trap blank name", "POST", "/api/traps", `{"name":"   ","type":"SSH","target":"1.2.3.4:22"}`, true, http.StatusBadRequest},
-		{"patch trap empty target", "PATCH", "/api/traps/1", `{"target":""}`, true, http.StatusBadRequest},
-		{"patch trap long type", "PATCH", "/api/traps/1", `{"type":"` + long + `"}`, true, http.StatusBadRequest},
+		{"create trap unknown class", "POST", "/api/traps", `{"name":"t","class":"nope","port":2222}`, true, http.StatusBadRequest},
+		{"create trap missing name", "POST", "/api/traps", `{"name":"  ","class":"banner","port":2222}`, true, http.StatusBadRequest},
+		{"create trap bad port", "POST", "/api/traps", `{"name":"t","class":"banner","port":0}`, true, http.StatusBadRequest},
+		{"create multiport without ports", "POST", "/api/traps", `{"name":"t","class":"port_listener","ports":""}`, true, http.StatusBadRequest},
+		{"create trap params not object", "POST", "/api/traps", `{"name":"t","class":"banner","port":2222,"params":[1,2]}`, true, http.StatusBadRequest},
+		{"patch trap bad port", "PATCH", "/api/traps/1", `{"port":99999}`, true, http.StatusBadRequest},
 		{"body too large", "POST", "/api/traps", `{"name":"` + strings.Repeat("a", httpx.MaxBodyBytes) + `"}`, true, http.StatusRequestEntityTooLarge},
 	}
 
@@ -71,9 +78,9 @@ func TestCrossOriginRequestRejected(t *testing.T) {
 	api := router.NewAPI(h, authMgr)
 	token, _ := authMgr.CreateToken(1)
 
-	body := `{"name":"evil","type":"SSH","target":"1.2.3.4:22","active":true}`
+	body := `{"name":"evil","class":"banner","port":2222,"params":{"banner":"x"}}`
 
-	// Браузер с чужого сайта: cookie прикреплена, но запрос должен быть отклонён.
+	// Cross-site browser POST with cookie must be rejected.
 	req := httptest.NewRequest("POST", "http://localhost:8080/api/traps", strings.NewReader(body))
 	req.Header.Set("Origin", "http://evil.example")
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
@@ -84,7 +91,7 @@ func TestCrossOriginRequestRejected(t *testing.T) {
 		t.Fatalf("expected 403 for cross-site POST, got %d", rec.Code)
 	}
 
-	// Тот же запрос со своей страницы проходит.
+	// Same-origin passes.
 	req = httptest.NewRequest("POST", "http://localhost:8080/api/traps", strings.NewReader(body))
 	req.Header.Set("Origin", "http://localhost:8080")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -94,4 +101,22 @@ func TestCrossOriginRequestRejected(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201 for same-origin POST, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestIngestBypassesCrossOrigin(t *testing.T) {
+	h, authMgr, store := setupTest(t)
+	api := router.NewAPI(h, authMgr)
+	trap, _ := store.CreateTrap(nil, modelsTrap(), "tok-ing")
+
+	// Agent POST from "cross-site" (no browser) must be allowed through to ingest.
+	ev := `{"trap_class":"banner","event_type":"connect","src_ip":"9.9.9.9","ts":1700000000}`
+	req := httptest.NewRequest("POST", "http://localhost:8080/api/ingest", strings.NewReader(ev))
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	req.Header.Set("X-HF-Token", "tok-ing")
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for agent ingest, got %d: %s", rec.Code, rec.Body.String())
+	}
+	_ = trap
 }

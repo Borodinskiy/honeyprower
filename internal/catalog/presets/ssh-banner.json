@@ -1,0 +1,18 @@
+{
+  "name": "SSH баннер (OpenSSH 8.9 Ubuntu)",
+  "class": "banner",
+  "port": 2222,
+  "tags": [
+    "ssh"
+  ],
+  "description": "Только баннер версии SSH: фиксирует подключение и версию клиента (первая строка ввода).",
+  "params": {
+    "banner": "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10\\r\\n",
+    "close_after_input": true
+  },
+  "probe": [
+    "SSH-2.0-OpenSSH_9.6"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

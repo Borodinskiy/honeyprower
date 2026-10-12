@@ -626,3 +626,45 @@ body.dark-theme .event-type { color: var(--color-accent); }
     margin-bottom: 18px;
     text-align: center;
 }
+
+/* --- Класс-ориентированное создание ловушек и события агента --- */
+.field-help {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+.code-input {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: ui-monospace, "Cascadia Code", "Fira Code", Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border, #333);
+    background: var(--input-bg, #1b1b1f);
+    color: var(--text, #e6e6e6);
+    resize: vertical;
+}
+.run-steps {
+    margin: 0 0 16px;
+    padding-left: 20px;
+    line-height: 1.7;
+    color: var(--text, #e6e6e6);
+}
+.run-steps code,
+.event-detail code {
+    background: var(--input-bg, #1b1b1f);
+    padding: 1px 6px;
+    border-radius: 5px;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12.5px;
+}
+#created-token {
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12.5px;
+}
+.event-item.event-warn {
+    border-left: 3px solid #f59e0b;
+}

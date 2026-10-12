@@ -79,9 +79,10 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// CrossOrigin отклоняет небезопасные (POST/PATCH/DELETE) запросы, пришедшие
-// из браузера с чужого origin. Это защищает cookie-сессию от CSRF.
-// Запросы без браузерных заголовков (curl, агенты) пропускаются.
-func CrossOrigin(next http.Handler) http.Handler {
-	return http.NewCrossOriginProtection().Handler(next)
+// NewCrossOrigin возвращает защиту от CSRF: небезопасные (POST/PATCH/DELETE)
+// запросы, пришедшие из браузера с чужого origin, отклоняются. Запросы без
+// браузерных заголовков (curl, агенты) пропускаются. Вызывающий может добавить
+// исключения через AddInsecureBypassPattern (например, для канала агентов).
+func NewCrossOrigin() *http.CrossOriginProtection {
+	return http.NewCrossOriginProtection()
 }

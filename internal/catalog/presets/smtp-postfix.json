@@ -1,0 +1,157 @@
+{
+  "name": "SMTP (Postfix)",
+  "class": "dialog",
+  "port": 2525,
+  "tags": [
+    "smtp",
+    "mail",
+    "auth"
+  ],
+  "description": "SMTP: EHLO, AUTH LOGIN/PLAIN (base64 декодируется), приём письма в режиме DATA. Реальный порт 25/587.",
+  "params": {
+    "hostname": "mail.corp.local",
+    "greeting": "220 {hostname} ESMTP Postfix (Ubuntu)\\r\\n",
+    "default_response": "502 5.5.2 Error: command not recognized\\r\\n",
+    "rules": [
+      {
+        "state": "start",
+        "match": "^(EHLO|HELO)\\s*(.*)$",
+        "response": "250-{hostname}\\r\\n250-PIPELINING\\r\\n250-SIZE 10240000\\r\\n250-AUTH PLAIN LOGIN\\r\\n250-ENHANCEDSTATUSCODES\\r\\n250-8BITMIME\\r\\n250 SMTPUTF8\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^AUTH PLAIN\\s+(\\S+)$",
+        "response": "535 5.7.8 Error: authentication failed: authentication failure\\r\\n",
+        "capture": "username",
+        "decode": "sasl_plain",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^AUTH LOGIN\\s*$",
+        "response": "334 VXNlcm5hbWU6\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "auth_user",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "auth_user",
+        "match": "^(\\S+)$",
+        "response": "334 UGFzc3dvcmQ6\\r\\n",
+        "capture": "username",
+        "decode": "base64",
+        "next_state": "auth_pass",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "auth_pass",
+        "match": "^(\\S*)$",
+        "response": "535 5.7.8 Error: authentication failed: authentication failure\\r\\n",
+        "capture": "password",
+        "decode": "base64",
+        "next_state": "start",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "start",
+        "match": "^MAIL FROM:",
+        "response": "250 2.1.0 Ok\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "start",
+        "match": "^RCPT TO:",
+        "response": "250 2.1.5 Ok\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "start",
+        "match": "^DATA",
+        "response": "354 End data with <CR><LF>.<CR><LF>\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "data",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "data",
+        "match": "^\\.$",
+        "response": "250 2.0.0 Ok: queued as 4F1A82C0D3\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "start",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "data",
+        "match": "^(.*)$",
+        "response": "",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^RSET",
+        "response": "250 2.0.0 Ok\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^NOOP",
+        "response": "250 2.0.0 Ok\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^QUIT",
+        "response": "221 2.0.0 Bye\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": true,
+        "log": true
+      }
+    ]
+  },
+  "probe": [
+    "EHLO test.local",
+    "AUTH LOGIN",
+    "YWRtaW4=",
+    "cGFzc3dvcmQ=",
+    "QUIT"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

@@ -137,8 +137,7 @@ const api = {
             MOCK_DATA.events[created.id] = MOCK_DATA.events[created.id] || [];
             return { ...created };
         }
-        const created = await this._request('/traps', { method: 'POST', body: trap });
-        return { warnings: 0, totalEvents: 0, lastEventAt: '—', active: true, ...created };
+        return this._request('/traps', { method: 'POST', body: trap });
     },
 
     async updateTrap(id, patch) {
@@ -161,9 +160,20 @@ const api = {
         return this._request(`/traps/${id}`, { method: 'DELETE' });
     },
 
-    async getTrapEvents(id) {
+    async getTrapEvents(id, type = '') {
         if (CONFIG.USE_MOCK_DATA) return MOCK_DATA.events[Number(id)] || [];
-        return this._request(`/traps/${id}/events`);
+        const q = type ? `?type=${encodeURIComponent(type)}` : '';
+        return this._request(`/traps/${id}/events${q}`);
+    },
+
+    async getClasses() {
+        if (CONFIG.USE_MOCK_DATA) return [];
+        return this._request('/classes');
+    },
+
+    async getPresets() {
+        if (CONFIG.USE_MOCK_DATA) return [];
+        return this._request('/presets');
     },
 
     _recalcStats() {
@@ -224,22 +234,36 @@ const state = {
     currentLang: 'ru',
     currentTab: 'traps',
     traps: [],
+    classes: [],
+    presets: [],
     stats: null,
     user: null,
     searchQuery: '',
     loading: false,
     selectedTrapId: null,
-    editingTrapId: null
+    editingTrapId: null,
+    eventTypeFilter: ''
 };
 
 const TAB_LABELS = { traps: 'Ловушки', stats: 'Статистика', events: 'События' };
 
-// Типы событий  (русские подписи)
+// Типы событий (русские подписи). Набор закрыт на стороне агента/центра.
 const EVENT_TYPE_LABELS = {
-    connection: 'Подключение',
+    connect: 'Подключение',
+    disconnect: 'Отключение',
+    data: 'Данные',
     auth: 'Попытка входа',
-    scan: 'Сканирование'
+    command: 'Команда',
+    request: 'HTTP-запрос',
+    handshake: 'Рукопожатие',
+    scan: 'Сканирование',
+    token: 'Honeytoken',
+    error: 'Ошибка'
 };
+
+// Статусы ловушки.
+const STATUS_LABELS = { online: '● Online', offline: '● Offline', never: '○ Не выходила на связь' };
+const STATUS_COLORS = { online: '#10b981', offline: '#f59e0b', never: '#6b7280' };
 
 // 2. СЛОВАРЬ ПЕРЕВОДОВ (каюсь грешен, переводил не сам, могут быть ошибки)
 
@@ -262,10 +286,12 @@ const I18N_DICT = {
     "Всего событий": "Total events",
     "Последнее": "Last",
 
-    "Активные ловушки": "Active Traps",
+    "Ловушек на связи": "Traps online",
+    "Включённых ловушек": "Enabled traps",
     "Предупреждения (за 24ч)": "Warnings (24h)",
-    "Активные задачи": "Active Tasks",
     "Детализация по активным ловушкам": "Details for active traps",
+    "Параметры должны быть корректным JSON.": "Params must be valid JSON.",
+    "Параметры должны быть JSON-объектом.": "Params must be a JSON object.",
 
     "Ловушка:": "Trap:",
     "— Выберите ловушку —": "— Select a trap —",
@@ -418,30 +444,6 @@ function getErrorMessage(err, fallbackRuKey) {
     return serverMsg || t(fallbackRuKey);
 }
 
-// проверка на вшивость ввода IP,URL или хоста
-function isValidTarget(value) {
-    if (!value || !value.trim()) return false;
-    const v = value.trim();
-
-    if (/^https?:\/\/[^\s]+$/i.test(v)) return true;
-
-    const hostRe = /^([a-z0-9]([a-z0-9\-]*[a-z0-9])?\.)*[a-z0-9]([a-z0-9\-]*[a-z0-9])?$/i;
-    const ipv4Re = /^(\d{1,3}\.){3}\d{1,3}$/;
-    const portRe = /^:\d{1,5}$/;
-
-    let host = v, port = '';
-    const colonIdx = v.lastIndexOf(':');
-    if (colonIdx > -1) {
-        host = v.slice(0, colonIdx);
-        port = v.slice(colonIdx);
-        if (!portRe.test(port)) return false;
-    }
-
-    if (ipv4Re.test(host)) {
-        return host.split('.').every(n => +n >= 0 && +n <= 255);
-    }
-    return hostRe.test(host);
-}
 
 
 // 5. РЕНДЕР
@@ -480,22 +482,34 @@ function updateTrapActions() {
     if (deleteBtn) deleteBtn.disabled = !hasSelection;
 }
 
+// Адрес ловушки: bind:port или bind + список портов.
+function trapAddress(trap) {
+    if (trap.ports) return `${trap.bind || '0.0.0.0'} : ${trap.ports}`;
+    return `${trap.bind || '0.0.0.0'}:${trap.port}`;
+}
+
+function classTitle(classId) {
+    const c = state.classes.find(c => c.id === classId);
+    return c ? c.title : classId;
+}
+
 // собирает структуру для карточки с ловушкой
 function buildTrapCard(trap) {
-    const statusClass = trap.active ? '' : 'inactive';
-    const statusColor = trap.active ? '#10b981' : '#6b7280';
-    const statusText = trap.active ? t('● Активна') : t('● Неактивна');
-    const targetLabel = (trap.target || '').includes('http') ? 'URL' : 'IP';
+    const status = trap.status || 'never';
+    const statusClass = status === 'online' ? '' : 'inactive';
+    const statusText = STATUS_LABELS[status] || status;
+    const statusColor = STATUS_COLORS[status] || '#6b7280';
     const selectedClass = state.selectedTrapId === trap.id ? 'selected' : '';
+    const enabledBadge = trap.enabled ? '' : ' <span style="color:#6b7280;font-size:11px;">(выключена)</span>';
 
     return `
         <div class="trap-item ${statusClass} ${selectedClass}" data-trap-id="${trap.id}">
             <div class="trap-title">
-                <span>${escapeHtml(trap.name)} (${escapeHtml(trap.type)})</span>
+                <span>${escapeHtml(trap.name)} <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(classTitle(trap.class))}</span>${enabledBadge}</span>
                 <span style="color: ${statusColor}; font-size: 12px;">${statusText}</span>
             </div>
-            <div class="trap-info">${targetLabel}: ${escapeHtml(trap.target)}</div>
-            <div class="trap-info"><span>${t('Предупреждений')}</span>: ${escapeHtml(trap.warnings ?? 0)}</div>
+            <div class="trap-info">Адрес: ${escapeHtml(trapAddress(trap))}</div>
+            <div class="trap-info"><span>Событий</span>: ${escapeHtml(trap.totalEvents ?? 0)} · <span>${t('Предупреждений')}</span>: ${escapeHtml(trap.warnings ?? 0)} · <span>${t('Последнее')}</span>: ${escapeHtml(trap.lastEventAt ?? '—')}</div>
         </div>
     `;
 }
@@ -514,8 +528,9 @@ function renderTraps() {
     const filtered = state.traps.filter(trap => {
         if (!query) return true;
         return (trap.name || '').toLowerCase().includes(query)
-            || (trap.target || '').toLowerCase().includes(query)
-            || (trap.type || '').toLowerCase().includes(query);
+            || (trap.class || '').toLowerCase().includes(query)
+            || classTitle(trap.class).toLowerCase().includes(query)
+            || trapAddress(trap).toLowerCase().includes(query);
     });
 
     container.innerHTML = filtered.length
@@ -541,16 +556,20 @@ function renderStats() {
     const s = state.stats;
     container.innerHTML = `
         <div class="stat-card">
+            <div class="stat-value" style="color: #10b981;">${escapeHtml(s.onlineTraps ?? 0)}</div>
+            <div class="stat-label">${t('Ловушек на связи')}</div>
+        </div>
+        <div class="stat-card">
             <div class="stat-value">${escapeHtml(s.activeTraps ?? 0)}</div>
-            <div class="stat-label">${t('Активные ловушки')}</div>
+            <div class="stat-label">${t('Включённых ловушек')}</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" style="color: #f59e0b;">${escapeHtml(s.warnings24h ?? 0)}</div>
             <div class="stat-label">${t('Предупреждения (за 24ч)')}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value">${escapeHtml(s.activeTasks ?? 0)}</div>
-            <div class="stat-label">${t('Активные задачи')}</div>
+            <div class="stat-value">${escapeHtml(s.totalEvents ?? 0)}</div>
+            <div class="stat-label">${t('Всего событий')}</div>
         </div>
     `;
 }
@@ -560,7 +579,7 @@ function renderTrapDetails() {
     const container = document.getElementById('traps-detail-container');
     if (!container) return;
 
-    const active = state.traps.filter(trap => trap.active);
+    const active = state.traps.filter(trap => trap.enabled);
     if (active.length === 0) {
         container.innerHTML = `<p style="color: var(--text-muted);">${t('Данных пока нет.')}</p>`;
         return;
@@ -644,6 +663,17 @@ async function loadStats() {
     }
 }
 
+// Каталог классов и шаблонов нужен для формы создания и названий классов на карточках.
+async function loadCatalog() {
+    try {
+        const [classes, presets] = await Promise.all([api.getClasses(), api.getPresets()]);
+        state.classes = classes || [];
+        state.presets = presets || [];
+    } catch (err) {
+        console.error('[loadCatalog]', err);
+    }
+}
+
 // по идее тоже должно работать с бэком
 // полностью обновляет все данные с бэка и перерисовывает их в UI
 async function refreshAll() {
@@ -716,9 +746,71 @@ function switchAuthForm(type) {
     if (registerForm) registerForm.classList.toggle('active', type === 'register');
 }
 
+// Заполняет селект классов. Класс нельзя менять у существующей ловушки.
+function populateClassSelect(selectedClass) {
+    const sel = document.getElementById('trap-class');
+    if (!sel) return;
+    sel.innerHTML = state.classes.map(c =>
+        `<option value="${c.id}">${escapeHtml(c.title)}</option>`).join('');
+    if (selectedClass) sel.value = selectedClass;
+}
+
+// Шаблоны, подходящие выбранному классу.
+function populatePresetSelect(classId) {
+    const sel = document.getElementById('trap-preset');
+    if (!sel) return;
+    const list = state.presets.filter(p => p.class === classId);
+    sel.innerHTML = `<option value="">— Без шаблона —</option>` +
+        list.map(p => `<option value="${escapeHtml(p.presetId)}">${escapeHtml(p.name)}</option>`).join('');
+    sel.value = '';
+}
+
+// Класс многопортовый? (port_listener). Переключает поля порт/порты.
+function classIsMultiPort(classId) {
+    const c = state.classes.find(c => c.id === classId);
+    return !!(c && c.multiPort);
+}
+
+function applyClassDefaults(classId) {
+    const c = state.classes.find(c => c.id === classId);
+    const help = document.getElementById('trap-class-help');
+    if (help) help.textContent = c ? c.description : '';
+
+    const multi = classIsMultiPort(classId);
+    document.getElementById('trap-port-group').style.display = multi ? 'none' : '';
+    document.getElementById('trap-ports-group').style.display = multi ? '' : 'none';
+    if (c && !multi && c.defaultPort) document.getElementById('trap-port').value = c.defaultPort;
+
+    // Параметры по умолчанию класса.
+    if (c && c.defaultParams) {
+        document.getElementById('trap-params').value = prettyJSON(c.defaultParams);
+    }
+    populatePresetSelect(classId);
+}
+
+function applyPreset(presetId) {
+    const p = state.presets.find(p => p.presetId === presetId);
+    if (!p) return;
+    if (p.port) document.getElementById('trap-port').value = p.port;
+    if (p.params) document.getElementById('trap-params').value = prettyJSON(p.params);
+    if (!document.getElementById('trap-name').value.trim()) {
+        document.getElementById('trap-name').value = p.name;
+    }
+}
+
+function prettyJSON(value) {
+    try {
+        return JSON.stringify(typeof value === 'string' ? JSON.parse(value) : value, null, 2);
+    } catch (e) {
+        return typeof value === 'string' ? value : '';
+    }
+}
+
 function openTrapModal(mode, trapId = null) {
     const titleEl = document.getElementById('trap-modal-title');
     const form = document.getElementById('create-trap-form');
+    const classSel = document.getElementById('trap-class');
+    const presetGroup = document.getElementById('trap-preset-group');
 
     if (mode === 'edit' && trapId !== null) {
         const trap = state.traps.find(t => t.id === trapId);
@@ -727,18 +819,38 @@ function openTrapModal(mode, trapId = null) {
         state.editingTrapId = trapId;
         if (titleEl) titleEl.textContent = t('Редактирование ловушки');
 
-        document.getElementById('trap-name').value   = trap.name || '';
-        document.getElementById('trap-type').value   = trap.type || 'SSH';
-        document.getElementById('trap-target').value = trap.target || '';
-        document.getElementById('trap-active').checked = !!trap.active;
+        populateClassSelect(trap.class);
+        classSel.disabled = true;            // класс менять нельзя — проще пересоздать
+        if (presetGroup) presetGroup.style.display = 'none';
+        applyClassDefaults(trap.class);
+
+        document.getElementById('trap-name').value  = trap.name || '';
+        document.getElementById('trap-bind').value  = trap.bind || '0.0.0.0';
+        document.getElementById('trap-port').value  = trap.port || '';
+        document.getElementById('trap-ports').value = trap.ports || '';
+        document.getElementById('trap-params').value = prettyJSON(trap.params || {});
+        document.getElementById('trap-active').checked = !!trap.enabled;
     } else {
         state.editingTrapId = null;
         if (titleEl) titleEl.textContent = t('Создание новой ловушки');
         form.reset();
+        classSel.disabled = false;
+        if (presetGroup) presetGroup.style.display = '';
+        populateClassSelect();
+        applyClassDefaults(classSel.value);
+        document.getElementById('trap-bind').value = '0.0.0.0';
         document.getElementById('trap-active').checked = true;
     }
 
     openModal('create-trap-modal');
+}
+
+// Показывает окно с инструкцией запуска агента и ссылками на конфиг/бандл.
+function showCreatedModal(trap) {
+    document.getElementById('created-token').value = trap.token || '';
+    document.getElementById('download-config-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/config`;
+    document.getElementById('download-bundle-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/bundle`;
+    openModal('trap-created-modal');
 }
 
 
@@ -790,7 +902,7 @@ async function loadAndRenderEvents(trapId, { silent = false } = {}) {
     };
 
     try {
-        const events = await api.getTrapEvents(trapId) || [];
+        const events = await api.getTrapEvents(trapId, state.eventTypeFilter) || [];
         if (isStillSelected()) renderEvents(events);
     } catch (err) {
         console.error('[loadAndRenderEvents]', err);
@@ -805,29 +917,54 @@ async function loadAndRenderEvents(trapId, { silent = false } = {}) {
 async function handleSubmitTrap(event) {
     event.preventDefault();
 
-    const target = document.getElementById('trap-target').value.trim();
-    if (!isValidTarget(target)) {
-        alert(t('Некорректный IP-адрес или URL.'));
-        return;
+    const classId = document.getElementById('trap-class').value;
+    const multi = classIsMultiPort(classId);
+
+    // Параметры: валидный JSON-объект.
+    const paramsRaw = document.getElementById('trap-params').value.trim();
+    let params = {};
+    if (paramsRaw) {
+        try {
+            params = JSON.parse(paramsRaw);
+        } catch (e) {
+            alert(t('Параметры должны быть корректным JSON.'));
+            return;
+        }
+        if (typeof params !== 'object' || Array.isArray(params)) {
+            alert(t('Параметры должны быть JSON-объектом.'));
+            return;
+        }
     }
 
     const payload = {
-        name:   document.getElementById('trap-name').value.trim(),
-        type:   document.getElementById('trap-type').value,
-        target: target,
-        active: document.getElementById('trap-active').checked
+        name:    document.getElementById('trap-name').value.trim(),
+        class:   classId,
+        bind:    document.getElementById('trap-bind').value.trim() || '0.0.0.0',
+        port:    multi ? 0 : Number(document.getElementById('trap-port').value || 0),
+        ports:   multi ? document.getElementById('trap-ports').value.trim() : '',
+        params,
+        enabled: document.getElementById('trap-active').checked
     };
 
     try {
         if (state.editingTrapId !== null) {
-            await api.updateTrap(state.editingTrapId, payload);
+            // класс не меняем; отправляем изменяемые поля
+            const patch = {
+                name: payload.name, bind: payload.bind,
+                params, enabled: payload.enabled
+            };
+            if (multi) patch.ports = payload.ports; else patch.port = payload.port;
+            await api.updateTrap(state.editingTrapId, patch);
+            closeModal('create-trap-modal');
+            state.editingTrapId = null;
+            await refreshAll();
         } else {
-            await api.createTrap(payload);
+            const created = await api.createTrap(payload);
+            closeModal('create-trap-modal');
+            document.getElementById('create-trap-form').reset();
+            await refreshAll();
+            if (created && created.id) showCreatedModal(created);
         }
-        closeModal('create-trap-modal');
-        document.getElementById('create-trap-form').reset();
-        state.editingTrapId = null;
-        await refreshAll();
     } catch (err) {
         console.error('[handleSubmitTrap]', err);
         const fallback = state.editingTrapId !== null
@@ -867,6 +1004,31 @@ async function handleShowEvents() {
     await switchTab('events', eventsLink);
 }
 
+// Человекочитаемая строка-деталь события из его полей data/username/password.
+function eventDetail(ev) {
+    const d = ev.data || {};
+    switch (ev.type) {
+        case 'auth':
+            return `логин: ${ev.username ?? '∅'} · пароль: ${ev.password ?? '∅'}`;
+        case 'command':
+            return d.line ? `команда: ${d.line}` : '';
+        case 'request':
+            return [d.method, d.path].filter(Boolean).join(' ') + (d.user_agent ? ` · UA: ${d.user_agent}` : '');
+        case 'scan':
+            return `порты: ${(d.ports || []).join(', ')}`;
+        case 'token':
+            return `сработал токен ${d.label || d.token || ''}`;
+        case 'handshake':
+            return d.telnet_options ? `telnet: ${d.telnet_options.join(', ')}` : JSON.stringify(d);
+        case 'disconnect':
+            return `длительность: ${d.duration ?? '?'}с · принято байт: ${d.bytes_in ?? 0}`;
+        case 'data':
+            return d.text || d.hex || '';
+        default:
+            return d.text || '';
+    }
+}
+
 // вот это рисует список событий
 function renderEvents(events) {
     const listEl = document.getElementById('events-list');
@@ -879,14 +1041,17 @@ function renderEvents(events) {
 
     listEl.innerHTML = events.map(ev => {
         const typeLabel = t(EVENT_TYPE_LABELS[ev.type] || ev.type);
+        const src = ev.source ? `${ev.source}${ev.srcPort ? ':' + ev.srcPort : ''}` : '';
+        const proto = ev.proto && ev.proto !== 'tcp' ? ` [${escapeHtml(ev.proto)}]` : '';
+        const warn = ['auth', 'scan', 'token'].includes(ev.type) ? ' event-warn' : '';
         return `
-            <div class="event-item">
+            <div class="event-item${warn}">
                 <div class="event-head">
-                    <span class="event-type">${escapeHtml(typeLabel)}</span>
+                    <span class="event-type">${escapeHtml(typeLabel)}${proto}</span>
                     <span class="event-time">${escapeHtml(ev.time || '')}</span>
                 </div>
-                <div class="event-source">${escapeHtml(ev.source || '')}</div>
-                <div class="event-detail">${escapeHtml(ev.detail || '')}</div>
+                <div class="event-source">${escapeHtml(src)}${ev.dstPort ? ' → :' + escapeHtml(ev.dstPort) : ''}</div>
+                <div class="event-detail">${escapeHtml(eventDetail(ev))}</div>
             </div>
         `;
     }).join('');
@@ -1068,6 +1233,27 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
+    // --- Фильтр типа на вкладке «События» ---
+    const eventsTypeEl = document.getElementById('events-type-select');
+    if (eventsTypeEl) {
+        eventsTypeEl.addEventListener('change', async (e) => {
+            state.eventTypeFilter = e.target.value;
+            const sel = document.getElementById('events-trap-select');
+            const trapId = sel && sel.value ? Number(sel.value) : null;
+            if (trapId) await loadAndRenderEvents(trapId);
+        });
+    }
+
+    // --- Форма создания: класс и шаблон ---
+    const classSelEl = document.getElementById('trap-class');
+    if (classSelEl) {
+        classSelEl.addEventListener('change', (e) => applyClassDefaults(e.target.value));
+    }
+    const presetSelEl = document.getElementById('trap-preset');
+    if (presetSelEl) {
+        presetSelEl.addEventListener('change', (e) => applyPreset(e.target.value));
+    }
+
     // --- Кнопки действий над ловушкой ---
     const createBtn = document.getElementById('open-create-trap-btn');
     if (createBtn) {
@@ -1172,6 +1358,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (isDashboard) {
         await restoreSession();
+        await loadCatalog();
         await refreshAll();
         startPolling();
     } else if (isLogin) {
