@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,9 +47,7 @@ func main() {
 	apiURL, _ := url.Parse("http://" + cfg.APIAddr)
 	proxy := httputil.NewSingleHostReverseProxy(apiURL)
 
-	webMux := http.NewServeMux()
-	webMux.Handle("/api/", proxy)
-	webMux.Handle("/", http.FileServer(http.Dir(cfg.StaticDir)))
+	webMux := NewWebMux(cfg, authMgr, proxy)
 
 	webSrv := &http.Server{
 		Addr:         cfg.WebAddr,
@@ -93,4 +93,52 @@ func main() {
 	_ = webSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
 	log.Println("'Bye")
+}
+
+// NewWebMux configures the web server router with authentication checks and route protection.
+func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *http.ServeMux {
+	webMux := http.NewServeMux()
+	if proxy != nil {
+		webMux.Handle("/api/", proxy)
+	}
+
+	isAuthorized := func(r *http.Request) bool {
+		c, err := r.Cookie("session_token")
+		if err != nil || c.Value == "" {
+			return false
+		}
+		_, ok := authMgr.UserID(strings.TrimSpace(c.Value))
+		return ok
+	}
+
+	handleIndex := func(w http.ResponseWriter, r *http.Request) {
+		if isAuthorized(r) {
+			http.Redirect(w, r, "/dashboard.html", http.StatusFound)
+		} else {
+			http.Redirect(w, r, "/login.html", http.StatusFound)
+		}
+	}
+
+	webMux.HandleFunc("/{$}", handleIndex)
+	webMux.HandleFunc("/index.html", handleIndex)
+
+	webMux.HandleFunc("/dashboard.html", func(w http.ResponseWriter, r *http.Request) {
+		if isAuthorized(r) {
+			http.ServeFile(w, r, filepath.Join(cfg.StaticDir, "dashboard.html"))
+		} else {
+			http.Redirect(w, r, "/login.html", http.StatusFound)
+		}
+	})
+
+	webMux.HandleFunc("/login.html", func(w http.ResponseWriter, r *http.Request) {
+		if isAuthorized(r) {
+			http.Redirect(w, r, "/dashboard.html", http.StatusFound)
+		} else {
+			http.ServeFile(w, r, filepath.Join(cfg.StaticDir, "login.html"))
+		}
+	})
+
+	webMux.Handle("/", http.FileServer(http.Dir(cfg.StaticDir)))
+
+	return webMux
 }

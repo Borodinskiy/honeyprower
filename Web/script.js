@@ -72,6 +72,7 @@ const api = {
             const res = await fetch(url, {
                 method,
                 headers,
+                credentials: 'same-origin',
                 body: body ? JSON.stringify(body) : null,
                 signal: controller.signal
             });
@@ -99,15 +100,14 @@ const api = {
     },
 
     _handleAuthError() {
-        const hadToken = !!localStorage.getItem(CONFIG.AUTH_TOKEN_KEY);
-        if (!hadToken) return;
-
         localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
         state.user = null;
 
         applyUserMenu();
         document.querySelectorAll('.modal-overlay').forEach(m => m.style.display = 'none');
-        alert(t('Сессия истекла. Войдите заново.'));
+        if (window.location.pathname.endsWith('dashboard.html') || window.location.pathname === '/' || window.location.pathname === '/index.html') {
+            window.location.href = '/login.html';
+        }
     },
 
     _authHeaders() {
@@ -115,7 +115,7 @@ const api = {
         return token ? { 'Authorization': `Bearer ${token}` } : {};
     },
 
-    
+
     //  ЛОВУШКИ
 
     async getTraps() {
@@ -181,9 +181,9 @@ const api = {
         return { ...MOCK_DATA.stats };
     },
 
-  
+
     // АВТОРИЗАЦИЯ
-  
+
     async login(credentials) {
         if (CONFIG.USE_MOCK_DATA) return { token: 'mock-token', user: MOCK_DATA.user };
         return this._request('/auth/login', { method: 'POST', body: credentials, auth: false });
@@ -206,6 +206,22 @@ const api = {
         } catch (err) {
             if (err.status === 401) return null;
             throw err;
+        }
+    },
+
+    async logout() {
+        if (CONFIG.USE_MOCK_DATA) {
+            localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
+            state.user = null;
+            return { ok: true };
+        }
+        try {
+            await this._request('/auth/logout', { method: 'POST', auth: true });
+        } catch (err) {
+            console.error('[logout]', err);
+        } finally {
+            localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
+            state.user = null;
         }
     }
 };
@@ -607,7 +623,7 @@ async function loadStats() {
     }
 }
 
-// по идее тоже должно работать с бэком 
+// по идее тоже должно работать с бэком
 // полностью обновляет все данные с бэка и перерисовывает их в UI
 async function refreshAll() {
     state.loading = true;
@@ -623,15 +639,35 @@ async function refreshAll() {
 
 // 7. МОДАЛЬНЫЕ ОКНА (тут уже на удаление, скорее всего, чисто для показа того, как выглядит)
 
+function showAuthError(message) {
+    const errorEl = document.getElementById('auth-error');
+    if (errorEl) {
+        if (message) {
+            errorEl.textContent = message;
+            errorEl.style.display = 'block';
+        } else {
+            errorEl.textContent = '';
+            errorEl.style.display = 'none';
+        }
+    } else if (message) {
+        alert(message);
+    }
+}
+
 function openModal(modalId) {
-    document.getElementById(modalId).style.display = 'flex';
+    const el = document.getElementById(modalId);
+    if (el) el.style.display = 'flex';
 }
 function closeModal(modalId) {
-    document.getElementById(modalId).style.display = 'none';
+    const el = document.getElementById(modalId);
+    if (el) el.style.display = 'none';
 }
 function switchAuthForm(type) {
-    document.getElementById('login-form').classList.toggle('active', type === 'login');
-    document.getElementById('register-form').classList.toggle('active', type === 'register');
+    showAuthError('');
+    const loginForm = document.getElementById('login-form');
+    const registerForm = document.getElementById('register-form');
+    if (loginForm) loginForm.classList.toggle('active', type === 'login');
+    if (registerForm) registerForm.classList.toggle('active', type === 'register');
 }
 
 function openTrapModal(mode, trapId = null) {
@@ -799,6 +835,7 @@ function renderEvents(events) {
 // снова работа с бэком: обирает данные, отправляет на бэк, сохраняет токен, обновляет UI.
 async function handleLogin(event) {
     event.preventDefault();
+    showAuthError('');
     const form = event.target;
     const credentials = {
         username: form.username.value.trim(),
@@ -807,20 +844,27 @@ async function handleLogin(event) {
 
     try {
         const result = await api.login(credentials);
-        localStorage.setItem(CONFIG.AUTH_TOKEN_KEY, result.token);
-        state.user = result.user;
+        if (result && result.token) {
+            localStorage.setItem(CONFIG.AUTH_TOKEN_KEY, result.token);
+        }
+        if (result && result.user) {
+            state.user = result.user;
+        }
         applyUserMenu();
         closeModal('auth-modal');
         form.reset();
+        window.location.href = '/dashboard.html';
     } catch (err) {
         console.error('[handleLogin]', err);
-        alert(getErrorMessage(err, 'Неверный логин или пароль.'));
+        const errMsg = getErrorMessage(err, 'Неверный логин или пароль.');
+        showAuthError(errMsg);
     }
 }
 
 // дополнение к предыдущему
 async function handleRegister(event) {
     event.preventDefault();
+    showAuthError('');
     const form = event.target;
     const data = {
         username: form.username.value.trim(),
@@ -830,31 +874,48 @@ async function handleRegister(event) {
 
     try {
         const result = await api.register(data);
-        localStorage.setItem(CONFIG.AUTH_TOKEN_KEY, result.token);
-        state.user = result.user;
+        if (result && result.token) {
+            localStorage.setItem(CONFIG.AUTH_TOKEN_KEY, result.token);
+        }
+        if (result && result.user) {
+            state.user = result.user;
+        }
         applyUserMenu();
         closeModal('auth-modal');
         form.reset();
+        window.location.href = '/dashboard.html';
     } catch (err) {
         console.error('[handleRegister]', err);
-        alert(getErrorMessage(err, 'Не удалось зарегистрироваться.'));
+        const errMsg = getErrorMessage(err, 'Не удалось зарегистрироваться.');
+        showAuthError(errMsg);
     }
 }
 
-//должно восстанавливать сессию пользователя при загрузке страницы 
-async function restoreSession() {
-    const token = localStorage.getItem(CONFIG.AUTH_TOKEN_KEY);
-    if (!token) return;
+// Выход из системы
+async function handleLogout() {
+    try {
+        await api.logout();
+    } catch (err) {
+        console.error('[handleLogout]', err);
+    }
+    localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
+    state.user = null;
+    window.location.href = '/login.html';
+}
 
+// должно восстанавливать сессию пользователя при загрузке страницы
+async function restoreSession() {
     try {
         const user = await api.me();
         if (user) {
             state.user = user;
             applyUserMenu();
+            return user;
         }
     } catch (err) {
         console.error('[restoreSession]', err);
     }
+    return null;
 }
 
 
@@ -865,12 +926,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Восстановление темы и языка ДО первого рендера
     try {
         const savedTheme = localStorage.getItem(CONFIG.THEME_KEY);
+        const themeToggle = document.getElementById('theme-toggle');
         if (savedTheme === 'light') {
             document.body.classList.remove('dark-theme');
-            document.getElementById('theme-toggle').checked = false;
+            if (themeToggle) themeToggle.checked = false;
         } else if (savedTheme === 'dark') {
             document.body.classList.add('dark-theme');
-            document.getElementById('theme-toggle').checked = true;
+            if (themeToggle) themeToggle.checked = true;
         }
 
         const savedLang = localStorage.getItem(CONFIG.LANG_KEY);
@@ -890,90 +952,119 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // --- Тема ---
-    document.getElementById('theme-toggle').addEventListener('change', (e) => {
-        const isDark = e.target.checked;
-        document.body.classList.toggle('dark-theme', isDark);
-        try { localStorage.setItem(CONFIG.THEME_KEY, isDark ? 'dark' : 'light'); } catch (err) {}
-    });
+    const themeToggleEl = document.getElementById('theme-toggle');
+    if (themeToggleEl) {
+        themeToggleEl.addEventListener('change', (e) => {
+            const isDark = e.target.checked;
+            document.body.classList.toggle('dark-theme', isDark);
+            try { localStorage.setItem(CONFIG.THEME_KEY, isDark ? 'dark' : 'light'); } catch (err) {}
+        });
+    }
 
     // --- Язык ---
-    document.getElementById('lang-switch').addEventListener('change', (e) => {
-        setLanguage(e.target.value);
-    });
+    const langSwitchEl = document.getElementById('lang-switch');
+    if (langSwitchEl) {
+        langSwitchEl.addEventListener('change', (e) => {
+            setLanguage(e.target.value);
+        });
+    }
 
     // --- Поиск ---
-    document.getElementById('traps-search').addEventListener('input', (e) => {
-        state.searchQuery = e.target.value;
-        renderTraps();
-    });
+    const trapsSearchEl = document.getElementById('traps-search');
+    if (trapsSearchEl) {
+        trapsSearchEl.addEventListener('input', (e) => {
+            state.searchQuery = e.target.value;
+            renderTraps();
+        });
+    }
 
     // --- Выбор ловушки кликом ---
-    document.getElementById('traps-list-container').addEventListener('click', (e) => {
-        const trapEl = e.target.closest('.trap-item');
-        if (!trapEl) return;
+    const trapsListEl = document.getElementById('traps-list-container');
+    if (trapsListEl) {
+        trapsListEl.addEventListener('click', (e) => {
+            const trapEl = e.target.closest('.trap-item');
+            if (!trapEl) return;
 
-        const trapId = Number(trapEl.dataset.trapId);
-        state.selectedTrapId = state.selectedTrapId === trapId ? null : trapId;
+            const trapId = Number(trapEl.dataset.trapId);
+            state.selectedTrapId = state.selectedTrapId === trapId ? null : trapId;
 
-        renderTraps();
-        updateTrapActions();
-    });
+            renderTraps();
+            updateTrapActions();
+        });
+    }
 
     // --- Селект ловушек на вкладке «События» ---
-    document.getElementById('events-trap-select').addEventListener('change', async (e) => {
-        const trapId = e.target.value ? Number(e.target.value) : null;
-        state.selectedTrapId = trapId;
+    const eventsSelectEl = document.getElementById('events-trap-select');
+    if (eventsSelectEl) {
+        eventsSelectEl.addEventListener('change', async (e) => {
+            const trapId = e.target.value ? Number(e.target.value) : null;
+            state.selectedTrapId = trapId;
 
-        // Обновляем состояние кнопок и подсветку на вкладке «Ловушки»
-        renderTraps();
-        updateTrapActions();
+            // Обновляем состояние кнопок и подсветку на вкладке «Ловушки»
+            renderTraps();
+            updateTrapActions();
 
-        if (trapId) {
-            await loadAndRenderEvents(trapId);
-        } else {
-            const listEl = document.getElementById('events-list');
-            if (listEl) listEl.innerHTML = `<p class="no-events">${t('Выберите ловушку')}</p>`;
-        }
-    });
+            if (trapId) {
+                await loadAndRenderEvents(trapId);
+            } else {
+                const listEl = document.getElementById('events-list');
+                if (listEl) listEl.innerHTML = `<p class="no-events">${t('Выберите ловушку')}</p>`;
+            }
+        });
+    }
 
     // --- Кнопки действий над ловушкой ---
-    document.getElementById('open-create-trap-btn').addEventListener('click', () => {
-        openTrapModal('create');
-    });
+    const createBtn = document.getElementById('open-create-trap-btn');
+    if (createBtn) {
+        createBtn.addEventListener('click', () => {
+            openTrapModal('create');
+        });
+    }
 
-    document.getElementById('open-edit-trap-btn').addEventListener('click', () => {
-        if (state.selectedTrapId === null) return;
-        openTrapModal('edit', state.selectedTrapId);
-    });
+    const editBtn = document.getElementById('open-edit-trap-btn');
+    if (editBtn) {
+        editBtn.addEventListener('click', () => {
+            if (state.selectedTrapId === null) return;
+            openTrapModal('edit', state.selectedTrapId);
+        });
+    }
 
-    document.getElementById('delete-trap-btn').addEventListener('click', () => {
-        if (state.selectedTrapId === null) return;
-        handleDeleteTrap();
-    });
+    const deleteBtn = document.getElementById('delete-trap-btn');
+    if (deleteBtn) {
+        deleteBtn.addEventListener('click', () => {
+            if (state.selectedTrapId === null) return;
+            handleDeleteTrap();
+        });
+    }
 
-    document.getElementById('open-events-trap-btn').addEventListener('click', () => {
-        if (state.selectedTrapId === null) return;
-        handleShowEvents();
-    });
+    const eventsBtn = document.getElementById('open-events-trap-btn');
+    if (eventsBtn) {
+        eventsBtn.addEventListener('click', () => {
+            if (state.selectedTrapId === null) return;
+            handleShowEvents();
+        });
+    }
 
     // --- Меню пользователя ---
     const userMenuBtn = document.getElementById('user-menu-btn');
     const userDropdown = document.getElementById('user-dropdown');
 
-    userMenuBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        userDropdown.classList.toggle('show');
-    });
+    if (userMenuBtn && userDropdown) {
+        userMenuBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            userDropdown.classList.toggle('show');
+        });
 
-    document.addEventListener('click', (e) => {
-        if (!userDropdown.contains(e.target) && e.target !== userMenuBtn) {
-            userDropdown.classList.remove('show');
-        }
-    });
+        document.addEventListener('click', (e) => {
+            if (!userDropdown.contains(e.target) && e.target !== userMenuBtn) {
+                userDropdown.classList.remove('show');
+            }
+        });
+    }
 
     // --- Пункты меню ---
     document.querySelectorAll('[data-action]').forEach(item => {
-        item.addEventListener('click', (e) => {
+        item.addEventListener('click', async (e) => {
             e.preventDefault();
             const action = item.getAttribute('data-action');
             if (action === 'open-login') {
@@ -983,12 +1074,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 openModal('auth-modal');
                 switchAuthForm('register');
             } else if (action === 'logout') {
-                localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
-                state.user = null;
-                applyUserMenu();
-                document.querySelectorAll('.modal-overlay').forEach(m => m.style.display = 'none');
+                await handleLogout();
             }
-            userDropdown.classList.remove('show');
+            if (userDropdown) userDropdown.classList.remove('show');
         });
     });
 
@@ -1012,12 +1100,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // --- Формы ---
-    document.getElementById('create-trap-form').addEventListener('submit', handleSubmitTrap);
-    document.getElementById('login-form-el').addEventListener('submit', handleLogin);
-    document.getElementById('register-form-el').addEventListener('submit', handleRegister);
+    const createTrapFormEl = document.getElementById('create-trap-form');
+    if (createTrapFormEl) createTrapFormEl.addEventListener('submit', handleSubmitTrap);
+
+    const loginFormEl = document.getElementById('login-form-el');
+    if (loginFormEl) loginFormEl.addEventListener('submit', handleLogin);
+
+    const registerFormEl = document.getElementById('register-form-el');
+    if (registerFormEl) registerFormEl.addEventListener('submit', handleRegister);
 
     // --- Первичный перевод, восстановление сессии, загрузка данных ---
     translateStatic();
-    await restoreSession();
-    await refreshAll();
+
+    const isDashboard = !!document.getElementById('traps-list-container');
+    const isLogin = !!document.getElementById('login-form-el') && !isDashboard;
+
+    if (isDashboard) {
+        await restoreSession();
+        await refreshAll();
+    } else if (isLogin) {
+        const user = await restoreSession();
+        if (user) {
+            window.location.href = '/dashboard.html';
+        }
+    } else {
+        const user = await restoreSession();
+        if (document.getElementById('traps-list-container')) {
+            await refreshAll();
+        }
+    }
 });

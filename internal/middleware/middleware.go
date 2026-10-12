@@ -20,11 +20,16 @@ func UserIDFromContext(ctx context.Context) (int64, bool) {
 	return id, ok
 }
 
-// Auth verifies the Bearer token and puts the user id into the request context.
+// Auth verifies the Bearer token or session_token cookie and puts the user id into the request context.
 func Auth(mgr *auth.Manager) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tok := bearerToken(r)
+			tok := BearerToken(r)
+			if tok == "" {
+				if c, err := r.Cookie("session_token"); err == nil {
+					tok = strings.TrimSpace(c.Value)
+				}
+			}
 			if tok == "" {
 				httpx.WriteError(w, http.StatusUnauthorized, "missing token")
 				return
@@ -39,7 +44,7 @@ func Auth(mgr *auth.Manager) func(http.Handler) http.Handler {
 	}
 }
 
-func bearerToken(r *http.Request) string {
+func BearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if h == "" {
 		return ""
