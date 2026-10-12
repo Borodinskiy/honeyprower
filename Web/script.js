@@ -11,7 +11,7 @@
 //    иначе refreshAll() вернёт старые данные и UI не обновится.
 // ============================================================
 const CONFIG = {
-    USE_MOCK_DATA: true,
+    USE_MOCK_DATA: false,
     API_BASE_URL: '/api',
     AUTH_TOKEN_KEY: 'auth_token',
     LANG_KEY: 'app_lang',
@@ -446,7 +446,7 @@ function updateTrapActions() {
     if (deleteBtn) deleteBtn.disabled = !hasSelection;
 }
 
-// собирает струкру для карточки с ловушкой
+// собирает структуру для карточки с ловушкой
 function buildTrapCard(trap) {
     const statusClass = trap.active ? '' : 'inactive';
     const statusColor = trap.active ? '#10b981' : '#6b7280';
