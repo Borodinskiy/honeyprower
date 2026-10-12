@@ -23,11 +23,11 @@ func main() {
 	cfg := config.Load()
 
 	// ---------- Database ----------
-
-	// TODO: хранит базу данных в памяти и теряет всё при завершении работы сервера
-	// Для фикса вместо NewMemory нужно сделать код под взаимодействие с другой бд
-	store := storage.NewInMemory()
-	storage.Seed(store)
+	store, err := storage.NewPostgres(context.Background(), cfg.DBDSN)
+	if err != nil {
+		log.Fatalf("failed to initialize postgres storage: %v", err)
+	}
+	defer store.Close()
 
 	authMgr := auth.NewManager()
 	h := handlers.New(store, authMgr)
