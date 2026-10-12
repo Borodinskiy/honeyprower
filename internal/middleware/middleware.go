@@ -15,6 +15,9 @@ type ctxKey string
 
 const userIDKey ctxKey = "userID"
 
+// SessionCookie — имя cookie с токеном сессии.
+const SessionCookie = "session_token"
+
 func UserIDFromContext(ctx context.Context) (int64, bool) {
 	id, ok := ctx.Value(userIDKey).(int64)
 	return id, ok
@@ -26,7 +29,7 @@ func Auth(mgr *auth.Manager) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tok := BearerToken(r)
 			if tok == "" {
-				if c, err := r.Cookie("session_token"); err == nil {
+				if c, err := r.Cookie(SessionCookie); err == nil {
 					tok = strings.TrimSpace(c.Value)
 				}
 			}
@@ -76,16 +79,9 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// CORS is a permissive policy for development; tighten for production.
-func CORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// CrossOrigin отклоняет небезопасные (POST/PATCH/DELETE) запросы, пришедшие
+// из браузера с чужого origin. Это защищает cookie-сессию от CSRF.
+// Запросы без браузерных заголовков (curl, агенты) пропускаются.
+func CrossOrigin(next http.Handler) http.Handler {
+	return http.NewCrossOriginProtection().Handler(next)
 }

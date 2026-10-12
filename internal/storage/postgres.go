@@ -43,26 +43,32 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 }
 
 func (p *Postgres) initSchemaAndSeed(ctx context.Context) error {
-	if _, err := p.db.ExecContext(ctx, migrations.SchemaSQL); err != nil {
+	// всё в одной транзакции: при ошибке сида не останется полузаполненной БД
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin init tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // после Commit это no-op
+
+	if _, err := tx.ExecContext(ctx, migrations.SchemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 
-	var userCount int
-	if err := p.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&userCount); err != nil {
-		return fmt.Errorf("check users count: %w", err)
+	var empty bool
+	if err := tx.QueryRowContext(ctx,
+		"SELECT NOT EXISTS (SELECT 1 FROM users) AND NOT EXISTS (SELECT 1 FROM traps)",
+	).Scan(&empty); err != nil {
+		return fmt.Errorf("check tables are empty: %w", err)
 	}
-
-	var trapCount int
-	if err := p.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM traps").Scan(&trapCount); err != nil {
-		return fmt.Errorf("check traps count: %w", err)
-	}
-
-	if userCount == 0 && trapCount == 0 {
-		if _, err := p.db.ExecContext(ctx, migrations.SeedSQL); err != nil {
+	if empty {
+		if _, err := tx.ExecContext(ctx, migrations.SeedSQL); err != nil {
 			return fmt.Errorf("apply seed: %w", err)
 		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit init tx: %w", err)
+	}
 	return nil
 }
 

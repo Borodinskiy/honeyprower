@@ -2,6 +2,7 @@ package auth
 
 import (
 	"testing"
+	"time"
 )
 
 func TestAuthManager(t *testing.T) {
@@ -34,6 +35,33 @@ func TestAuthManager(t *testing.T) {
 	_, ok = mgr.UserID(tok)
 	if ok {
 		t.Fatalf("expected revoked token to not be found")
+	}
+}
+
+func TestSessionExpiry(t *testing.T) {
+	mgr := NewManager()
+	now := time.Now()
+	mgr.now = func() time.Time { return now }
+
+	tok, err := mgr.CreateToken(7)
+	if err != nil {
+		t.Fatalf("failed to create token: %v", err)
+	}
+	if _, ok := mgr.UserID(tok); !ok {
+		t.Fatal("expected fresh token to be valid")
+	}
+
+	now = now.Add(SessionTTL + time.Second)
+	if _, ok := mgr.UserID(tok); ok {
+		t.Fatal("expected expired token to be rejected")
+	}
+
+	// новая сессия вычищает протухшие
+	if _, err := mgr.CreateToken(8); err != nil {
+		t.Fatalf("failed to create token: %v", err)
+	}
+	if _, exists := mgr.sessions[tok]; exists {
+		t.Fatal("expected expired session to be pruned")
 	}
 }
 

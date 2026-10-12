@@ -17,6 +17,7 @@ import (
 	"honeyprower/internal/auth"
 	"honeyprower/internal/config"
 	"honeyprower/internal/handlers"
+	"honeyprower/internal/middleware"
 	"honeyprower/internal/router"
 	"honeyprower/internal/storage"
 )
@@ -29,10 +30,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to initialize postgres storage: %v", err)
 	}
-	defer store.Close()
 
 	authMgr := auth.NewManager()
 	h := handlers.New(store, authMgr)
+	h.AllowRegistration = cfg.AllowRegistration
+	if !cfg.AllowRegistration {
+		log.Println("self-registration is disabled (ALLOW_REGISTRATION=false)")
+	}
 
 	// ---------- API server ----------
 	apiSrv := &http.Server{
@@ -61,7 +65,7 @@ func main() {
 	// Отслеживание цепочки ошибок в проверках ниже
 	errCh := make(chan error, 2)
 
-	// Ебанина, которая умом проверяет ошибки и записывает их в errCh
+	// Ошибки запуска серверов попадают в errCh.
 	// http.ErrServerClosed значит, что сервер был выключен вручную, по сути не ошибка запуска, поэтому скип
 	go func() {
 		log.Printf("web server  → http://%s   (static dir: %s)", cfg.WebAddr, cfg.StaticDir)
@@ -81,18 +85,23 @@ func main() {
 	// Отслеживание сигнала остановки сервера в виде Ctrl+C
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	exitCode := 0
 	select {
 	case err := <-errCh:
-		log.Fatalf("server error: %v", err)
+		// не log.Fatalf: иначе не отработают defer'ы и соединение с БД не закроется
+		log.Printf("server error: %v", err)
+		exitCode = 1
 	case sig := <-stop:
 		log.Printf("signal %s — shutting down", sig)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	_ = webSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
+	cancel()
+	_ = store.Close()
 	log.Println("'Bye")
+	os.Exit(exitCode)
 }
 
 // NewWebMux configures the web server router with authentication checks and route protection.
@@ -103,7 +112,7 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 	}
 
 	isAuthorized := func(r *http.Request) bool {
-		c, err := r.Cookie("session_token")
+		c, err := r.Cookie(middleware.SessionCookie)
 		if err != nil || c.Value == "" {
 			return false
 		}

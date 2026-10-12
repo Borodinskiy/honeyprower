@@ -32,5 +32,5 @@ func NewAPI(h *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	mux.Handle("GET /api/stats", requireAuth(http.HandlerFunc(h.GetStats)))
 
 	// outer middleware chain
-	return middleware.Logging(middleware.CORS(mux))
+	return middleware.Logging(middleware.CrossOrigin(mux))
 }

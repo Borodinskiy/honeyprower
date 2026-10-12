@@ -27,3 +27,8 @@ CREATE TABLE IF NOT EXISTS events (
     detail TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Логины регистронезависимы: вход ищет по LOWER(username), поэтому и уникальность должна быть по LOWER.
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_key ON users (LOWER(username));
+
+CREATE INDEX IF NOT EXISTS events_trap_id_idx ON events (trap_id);

@@ -1,10 +1,11 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"honeyprower/internal/httpx"
 	"honeyprower/internal/models"
@@ -22,12 +23,18 @@ func (h *Handlers) ListTraps(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) CreateTrap(w http.ResponseWriter, r *http.Request) {
 	var in models.TrapCreate
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON")
+	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
+	in.Name = strings.TrimSpace(in.Name)
+	in.Type = strings.TrimSpace(in.Type)
+	in.Target = strings.TrimSpace(in.Target)
 	if in.Name == "" || in.Type == "" || in.Target == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "name, type and target are required")
+		return
+	}
+	if msg := validateTrapFields(&in.Name, &in.Type, &in.Target); msg != "" {
+		httpx.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
 	trap, err := h.Store.CreateTrap(r.Context(), in)
@@ -63,8 +70,21 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var patch models.TrapPatch
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON")
+	if !httpx.DecodeJSON(w, r, &patch) {
+		return
+	}
+	for _, f := range []*string{patch.Name, patch.Type, patch.Target} {
+		if f == nil {
+			continue
+		}
+		*f = strings.TrimSpace(*f)
+		if *f == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "name, type and target must not be empty")
+			return
+		}
+	}
+	if msg := validateTrapFields(patch.Name, patch.Type, patch.Target); msg != "" {
+		httpx.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
 	trap, err := h.Store.UpdateTrap(r.Context(), id, patch)
@@ -97,3 +117,24 @@ func (h *Handlers) DeleteTrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseID(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }
+
+// Ограничения длины совпадают с размерами колонок в migrations/001_schema.sql.
+const (
+	maxTrapNameLen   = 255
+	maxTrapTypeLen   = 50
+	maxTrapTargetLen = 255
+)
+
+// validateTrapFields проверяет длину непустых полей; nil-поля пропускаются.
+// Возвращает текст ошибки или "".
+func validateTrapFields(name, typ, target *string) string {
+	switch {
+	case name != nil && utf8.RuneCountInString(*name) > maxTrapNameLen:
+		return "name is too long"
+	case typ != nil && utf8.RuneCountInString(*typ) > maxTrapTypeLen:
+		return "type is too long"
+	case target != nil && utf8.RuneCountInString(*target) > maxTrapTargetLen:
+		return "target is too long"
+	}
+	return ""
+}

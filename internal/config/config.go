@@ -1,8 +1,10 @@
 package config
 
 import (
-	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 )
 
 // Конфигурация сервера
@@ -11,15 +13,20 @@ type Config struct {
 	APIAddr   string // адрес хостинка сервиса API вызовов (ну типо JSON API)
 	StaticDir string // путь до директории, в которой находятся файлы фронтэнда
 	DBDSN     string // DSN подключение к базе данных PostgreSQL
+
+	AllowRegistration bool // разрешена ли самостоятельная регистрация операторов
 }
 
 // TODO: чтение конфигурационных файлов помимо переменных окружения
 func Load() *Config {
 	return &Config{
-		WebAddr:   getenv("WEB_ADDR", ":8080"),
-		APIAddr:   getenv("API_ADDR", ":8081"),
+		WebAddr: getenv("WEB_ADDR", ":8080"),
+		// API доступен снаружи только через прокси веб-сервера, поэтому по умолчанию слушает localhost
+		APIAddr:   getenv("API_ADDR", "127.0.0.1:8081"),
 		StaticDir: getenv("STATIC_DIR", "./Web"),
 		DBDSN:     getDBDSN(),
+
+		AllowRegistration: getbool("ALLOW_REGISTRATION", true),
 	}
 }
 
@@ -38,7 +45,15 @@ func getDBDSN() string {
 	name := getenv("DB_NAME", "honeyforge")
 	ssl := getenv("DB_SSLMODE", "disable")
 
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, ssl)
+	// url.URL экранирует спецсимволы в логине/пароле (например, '@' или '/')
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, pass),
+		Host:     net.JoinHostPort(host, port),
+		Path:     "/" + name,
+		RawQuery: url.Values{"sslmode": {ssl}}.Encode(),
+	}
+	return u.String()
 }
 
 // Возвращает значение переменной окружения k, иначе - значение по умолчанию из аргумента def
@@ -47,4 +62,13 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// Возвращает булево значение переменной окружения k (true/false, 1/0 и т.п.), иначе def
+func getbool(k string, def bool) bool {
+	v, err := strconv.ParseBool(os.Getenv(k))
+	if err != nil {
+		return def
+	}
+	return v
 }

@@ -5,7 +5,10 @@
 //   2. _request возвращает ТЕЛО КАК ЕСТЬ. Обёртки типа { data }
 //      распаковывай в конкретном методе.
 //   3. Ошибки нормализуются в ApiError.
-//   4. Контракт API см. в API.md.
+//   4. Контракт API см. в README.md.
+//   5. Сессия живёт в HttpOnly-cookie session_token, которую ставит
+//      сервер. Токен в localStorage НЕ храним: оттуда его может
+//      украсть любой XSS, а cookie из JS недоступна.
 //
 // ⚠️ В mock-режиме методы api ОБЯЗАНЫ мутировать MOCK_DATA,
 //    иначе refreshAll() вернёт старые данные и UI не обновится.
@@ -13,11 +16,11 @@
 const CONFIG = {
     USE_MOCK_DATA: false,
     API_BASE_URL: '/api',
-    AUTH_TOKEN_KEY: 'auth_token',
+    LEGACY_TOKEN_KEY: 'auth_token', // старые версии хранили токен здесь — подчищаем
     LANG_KEY: 'app_lang',
     THEME_KEY: 'app_theme',
     REQUEST_TIMEOUT: 10000,
-    // POLL_INTERVAL: 30000
+    POLL_INTERVAL: 10000 // автообновление дашборда, мс
 };
 
 // МОКОВЫЕ ДАННЫЕ
@@ -63,7 +66,6 @@ const api = {
         const url = `${CONFIG.API_BASE_URL}${endpoint}`;
 
         const headers = { 'Content-Type': 'application/json' };
-        if (auth) Object.assign(headers, this._authHeaders());
 
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT);
@@ -100,7 +102,6 @@ const api = {
     },
 
     _handleAuthError() {
-        localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
         state.user = null;
 
         applyUserMenu();
@@ -108,11 +109,6 @@ const api = {
         if (window.location.pathname.endsWith('dashboard.html') || window.location.pathname === '/' || window.location.pathname === '/index.html') {
             window.location.href = '/login.html';
         }
-    },
-
-    _authHeaders() {
-        const token = localStorage.getItem(CONFIG.AUTH_TOKEN_KEY);
-        return token ? { 'Authorization': `Bearer ${token}` } : {};
     },
 
 
@@ -197,10 +193,7 @@ const api = {
     },
 
     async me() {
-        if (CONFIG.USE_MOCK_DATA) {
-            const token = localStorage.getItem(CONFIG.AUTH_TOKEN_KEY);
-            return token ? { ...MOCK_DATA.user } : null;
-        }
+        if (CONFIG.USE_MOCK_DATA) return { ...MOCK_DATA.user };
         try {
             return await this._request('/auth/me');
         } catch (err) {
@@ -211,7 +204,6 @@ const api = {
 
     async logout() {
         if (CONFIG.USE_MOCK_DATA) {
-            localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
             state.user = null;
             return { ok: true };
         }
@@ -220,7 +212,6 @@ const api = {
         } catch (err) {
             console.error('[logout]', err);
         } finally {
-            localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
             state.user = null;
         }
     }
@@ -322,7 +313,33 @@ const I18N_DICT = {
     "Неверный логин или пароль.": "Invalid username or password.",
     "Не удалось зарегистрироваться.": "Registration failed.",
     "Сессия истекла. Войдите заново.": "Session expired. Please log in again.",
-    "Некорректный IP-адрес или URL.": "Invalid IP address or URL."
+    "Некорректный IP-адрес или URL.": "Invalid IP address or URL.",
+    "Удалить ловушку «{name}» вместе со всеми её событиями?": "Delete trap \"{name}\" with all its events?",
+
+    "Этот логин уже занят.": "This username is already taken.",
+    "Регистрация отключена администратором.": "Registration is disabled by the administrator.",
+    "Пароль должен быть не короче 6 символов.": "Password must be at least 6 characters.",
+    "Пароль слишком длинный.": "Password is too long.",
+    "Логин слишком длинный.": "Username is too long.",
+    "Некорректный email.": "Invalid email.",
+    "Заполните название, тип и адрес.": "Fill in name, type and target.",
+    "Слишком длинное значение поля.": "Field value is too long."
+};
+
+// Известные сообщения бэкенда → русские ключи словаря (см. internal/handlers)
+const SERVER_ERROR_LABELS = {
+    'invalid username or password': 'Неверный логин или пароль.',
+    'username already taken': 'Этот логин уже занят.',
+    'registration is disabled': 'Регистрация отключена администратором.',
+    'password must be at least 6 characters': 'Пароль должен быть не короче 6 символов.',
+    'password is too long': 'Пароль слишком длинный.',
+    'username is too long': 'Логин слишком длинный.',
+    'invalid email': 'Некорректный email.',
+    'name, type and target are required': 'Заполните название, тип и адрес.',
+    'name, type and target must not be empty': 'Заполните название, тип и адрес.',
+    'name is too long': 'Слишком длинное значение поля.',
+    'type is too long': 'Слишком длинное значение поля.',
+    'target is too long': 'Слишком длинное значение поля.'
 };
 
 const I18N_REVERSE = Object.fromEntries(
@@ -397,6 +414,7 @@ function getErrorMessage(err, fallbackRuKey) {
     const d = err?.data;
     const fromError = (typeof d?.error === 'object' && d.error !== null) ? d.error.message : d?.error;
     const serverMsg = fromError || d?.message;
+    if (serverMsg && SERVER_ERROR_LABELS[serverMsg]) return t(SERVER_ERROR_LABELS[serverMsg]);
     return serverMsg || t(fallbackRuKey);
 }
 
@@ -565,10 +583,15 @@ function renderEventsSelect() {
 
     const prevValue = select.value;
 
-    select.innerHTML = `<option value="">${t('— Выберите ловушку —')}</option>`
+    const optionsHtml = `<option value="">${t('— Выберите ловушку —')}</option>`
         + state.traps.map(trap =>
             `<option value="${trap.id}">${escapeHtml(trap.name)}</option>`
         ).join('');
+    // не пересобираем список без изменений: иначе автообновление закрывает открытый select
+    if (select.dataset.optionsHtml !== optionsHtml) {
+        select.innerHTML = optionsHtml;
+        select.dataset.optionsHtml = optionsHtml;
+    }
 
     if (state.selectedTrapId !== null
         && state.traps.some(t => t.id === state.selectedTrapId)) {
@@ -608,7 +631,6 @@ async function loadTraps() {
         }
     } catch (err) {
         console.error('[loadTraps]', err);
-        state.traps = [];
     }
 }
 
@@ -619,7 +641,6 @@ async function loadStats() {
         state.stats = await api.getStats() || null;
     } catch (err) {
         console.error('[loadStats]', err);
-        state.stats = null;
     }
 }
 
@@ -634,6 +655,31 @@ async function refreshAll() {
 
     state.loading = false;
     renderAll();
+}
+
+// Тихое фоновое обновление: без «Загрузка...», чтобы интерфейс не мигал.
+// Пропускается, пока вкладка браузера скрыта или идёт полная перезагрузка.
+async function pollRefresh() {
+    if (document.hidden || state.loading) return;
+
+    await Promise.all([loadTraps(), loadStats()]);
+    if (state.loading) return;
+    renderAll();
+
+    if (state.currentTab === 'events') {
+        const select = document.getElementById('events-trap-select');
+        const trapId = select && select.value ? Number(select.value) : null;
+        if (trapId) await loadAndRenderEvents(trapId, { silent: true });
+    }
+}
+
+function startPolling() {
+    if (!CONFIG.POLL_INTERVAL) return;
+    setInterval(pollRefresh, CONFIG.POLL_INTERVAL);
+    // вернулись на вкладку — сразу подтягиваем свежие данные
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) pollRefresh();
+    });
 }
 
 
@@ -725,7 +771,8 @@ async function switchTab(tabId, clickedLink) {
 }
 
 // Загружает и рендерит события для конкретной ловушки
-async function loadAndRenderEvents(trapId) {
+// silent — фоновое обновление: без плейсхолдера загрузки и без затирания списка при ошибке.
+async function loadAndRenderEvents(trapId, { silent = false } = {}) {
     const listEl = document.getElementById('events-list');
     if (!listEl) return;
 
@@ -734,14 +781,22 @@ async function loadAndRenderEvents(trapId) {
         return;
     }
 
-    listEl.innerHTML = `<p class="no-events">${t('Загрузка...')}</p>`;
+    if (!silent) listEl.innerHTML = `<p class="no-events">${t('Загрузка...')}</p>`;
+
+    // пока шёл запрос, пользователь мог выбрать другую ловушку — тогда ответ устарел
+    const isStillSelected = () => {
+        const select = document.getElementById('events-trap-select');
+        return !select || select.value === String(trapId);
+    };
 
     try {
         const events = await api.getTrapEvents(trapId) || [];
-        renderEvents(events);
+        if (isStillSelected()) renderEvents(events);
     } catch (err) {
         console.error('[loadAndRenderEvents]', err);
-        listEl.innerHTML = `<p class="no-events">${t('Не удалось загрузить события.')}</p>`;
+        if (!silent && isStillSelected()) {
+            listEl.innerHTML = `<p class="no-events">${t('Не удалось загрузить события.')}</p>`;
+        }
     }
 }
 
@@ -785,6 +840,11 @@ async function handleSubmitTrap(event) {
 //удаление выбранной ловушки..надеюсь только ловушк
 async function handleDeleteTrap() {
     if (state.selectedTrapId === null) return;
+
+    const trap = state.traps.find(tr => tr.id === state.selectedTrapId);
+    const question = t('Удалить ловушку «{name}» вместе со всеми её событиями?')
+        .replace('{name}', trap ? trap.name : state.selectedTrapId);
+    if (!confirm(question)) return;
 
     try {
         await api.deleteTrap(state.selectedTrapId);
@@ -844,9 +904,6 @@ async function handleLogin(event) {
 
     try {
         const result = await api.login(credentials);
-        if (result && result.token) {
-            localStorage.setItem(CONFIG.AUTH_TOKEN_KEY, result.token);
-        }
         if (result && result.user) {
             state.user = result.user;
         }
@@ -874,9 +931,6 @@ async function handleRegister(event) {
 
     try {
         const result = await api.register(data);
-        if (result && result.token) {
-            localStorage.setItem(CONFIG.AUTH_TOKEN_KEY, result.token);
-        }
         if (result && result.user) {
             state.user = result.user;
         }
@@ -898,7 +952,6 @@ async function handleLogout() {
     } catch (err) {
         console.error('[handleLogout]', err);
     }
-    localStorage.removeItem(CONFIG.AUTH_TOKEN_KEY);
     state.user = null;
     window.location.href = '/login.html';
 }
@@ -925,6 +978,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Восстановление темы и языка ДО первого рендера
     try {
+        localStorage.removeItem(CONFIG.LEGACY_TOKEN_KEY);
+
         const savedTheme = localStorage.getItem(CONFIG.THEME_KEY);
         const themeToggle = document.getElementById('theme-toggle');
         if (savedTheme === 'light') {
@@ -1118,6 +1173,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (isDashboard) {
         await restoreSession();
         await refreshAll();
+        startPolling();
     } else if (isLogin) {
         const user = await restoreSession();
         if (user) {

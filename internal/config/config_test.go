@@ -9,6 +9,7 @@ func clearEnv(t *testing.T) {
 		"WEB_ADDR", "API_ADDR", "STATIC_DIR",
 		"DB_DSN", "DATABASE_URL",
 		"DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_SSLMODE",
+		"ALLOW_REGISTRATION",
 	}
 	for _, v := range vars {
 		t.Setenv(v, "")
@@ -22,8 +23,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.WebAddr != ":8080" {
 		t.Errorf("expected WebAddr :8080, got %s", cfg.WebAddr)
 	}
-	if cfg.APIAddr != ":8081" {
-		t.Errorf("expected APIAddr :8081, got %s", cfg.APIAddr)
+	if cfg.APIAddr != "127.0.0.1:8081" {
+		t.Errorf("expected APIAddr 127.0.0.1:8081, got %s", cfg.APIAddr)
+	}
+	if !cfg.AllowRegistration {
+		t.Errorf("expected AllowRegistration true by default")
 	}
 	if cfg.StaticDir != "./Web" {
 		t.Errorf("expected StaticDir ./Web, got %s", cfg.StaticDir)
@@ -68,6 +72,30 @@ func TestLoadCompositeEnv(t *testing.T) {
 
 	cfg := Load()
 	const expected = "postgres://myuser:secret@db.example.com:5439/proddb?sslmode=require"
+	if cfg.DBDSN != expected {
+		t.Errorf("expected DBDSN %s, got %s", expected, cfg.DBDSN)
+	}
+}
+
+func TestLoadAllowRegistration(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ALLOW_REGISTRATION", "false")
+	if Load().AllowRegistration {
+		t.Error("expected AllowRegistration false")
+	}
+
+	t.Setenv("ALLOW_REGISTRATION", "garbage")
+	if !Load().AllowRegistration {
+		t.Error("expected invalid value to fall back to default true")
+	}
+}
+
+func TestLoadCompositeEnvEscapesPassword(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DB_PASSWORD", "p@ss:w/rd")
+
+	cfg := Load()
+	const expected = "postgres://postgres:p%40ss%3Aw%2Frd@localhost:5432/honeyforge?sslmode=disable"
 	if cfg.DBDSN != expected {
 		t.Errorf("expected DBDSN %s, got %s", expected, cfg.DBDSN)
 	}

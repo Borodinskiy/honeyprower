@@ -45,7 +45,7 @@ type Stats struct {
 
 type Event struct {
 	ID     int64  `json:"id"`
-	Type   string `json:"type"`   // connection | auth | scan
+	Type   string `json:"type"` // connection | auth | scan
 	Source string `json:"source"`
 	Time   string `json:"time"`
 	Detail string `json:"detail"`
