@@ -24,6 +24,9 @@ type Trap struct {
 	Ports     string          `json:"ports,omitempty"`
 	Params    json.RawMessage `json:"params"`
 	Token     string          `json:"token,omitempty"` // shown so the operator can build the agent config
+	KeyID     string          `json:"keyId,omitempty"`
+	PubKey    string          `json:"pubKey,omitempty"`
+	PrivKey   string          `json:"-"`
 	Enabled   bool            `json:"enabled"`
 	CreatedAt time.Time       `json:"createdAt"`
 
@@ -43,6 +46,9 @@ type TrapCreate struct {
 	Port    int             `json:"port"`
 	Ports   string          `json:"ports"`
 	Params  json.RawMessage `json:"params"`
+	KeyID   string          `json:"keyId,omitempty"`
+	PubKey  string          `json:"pubKey,omitempty"`
+	PrivKey string          `json:"-"`
 	Enabled bool            `json:"enabled"`
 }
 
@@ -53,6 +59,9 @@ type TrapPatch struct {
 	Port    *int             `json:"port,omitempty"`
 	Ports   *string          `json:"ports,omitempty"`
 	Params  *json.RawMessage `json:"params,omitempty"`
+	KeyID   *string          `json:"keyId,omitempty"`
+	PubKey  *string          `json:"pubKey,omitempty"`
+	PrivKey *string          `json:"-"`
 	Enabled *bool            `json:"enabled,omitempty"`
 }
 

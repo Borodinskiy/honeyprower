@@ -39,6 +39,8 @@ pub struct Event {
     pub ts: f64,
 }
 
+pub type IngestEvent = Event;
+
 impl Event {
     pub fn new(trap_class: &str, event_type: &str) -> Event {
         Event {

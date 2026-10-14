@@ -23,6 +23,7 @@ type Storage interface {
 	ListTraps(ctx context.Context) ([]models.Trap, error)
 	GetTrap(ctx context.Context, id int64) (*models.Trap, error)
 	GetTrapByToken(ctx context.Context, token string) (*models.Trap, error)
+	GetTrapByKeyID(ctx context.Context, keyID string) (*models.Trap, error)
 	CreateTrap(ctx context.Context, in models.TrapCreate, token string) (*models.Trap, error)
 	UpdateTrap(ctx context.Context, id int64, patch models.TrapPatch) (*models.Trap, error)
 	DeleteTrap(ctx context.Context, id int64) error

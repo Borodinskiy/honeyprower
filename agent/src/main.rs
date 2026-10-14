@@ -6,12 +6,13 @@
 //! Запуск:  honeyforge-agent [путь-к-config.json]
 //! По умолчанию конфиг берётся из $HF_CONFIG или ./config.json.
 
-mod config;
-mod event;
-mod sender;
-mod session;
-mod traps;
-mod util;
+pub mod config;
+pub mod crypto;
+pub mod event;
+pub mod sender;
+pub mod session;
+pub mod traps;
+pub mod util;
 
 #[cfg(test)]
 mod tests;

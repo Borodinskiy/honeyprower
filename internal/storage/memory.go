@@ -106,6 +106,18 @@ func (m *Memory) GetTrapByToken(_ context.Context, token string) (*models.Trap, 
 	return &t, nil
 }
 
+func (m *Memory) GetTrapByKeyID(_ context.Context, keyID string) (*models.Trap, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.traps {
+		if r.def.KeyID != "" && r.def.KeyID == keyID {
+			t := m.view(r)
+			return &t, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (m *Memory) CreateTrap(_ context.Context, in models.TrapCreate, token string) (*models.Trap, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -145,6 +145,10 @@ func (p *Postgres) GetTrapByToken(ctx context.Context, token string) (*models.Tr
 	return t, err
 }
 
+func (p *Postgres) GetTrapByKeyID(ctx context.Context, keyID string) (*models.Trap, error) {
+	return nil, ErrNotFound
+}
+
 func (p *Postgres) CreateTrap(ctx context.Context, in models.TrapCreate, token string) (*models.Trap, error) {
 	params := in.Params
 	if len(params) == 0 {
