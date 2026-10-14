@@ -22,6 +22,9 @@ func NewAPI(h *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	// --- public: agent telemetry (authenticated by the trap's own token) ---
 	mux.HandleFunc("POST /api/ingest", h.Ingest)
 	mux.HandleFunc("POST /api/heartbeat", h.Heartbeat)
+	mux.HandleFunc("POST /cdn-cgi/rum", h.HandleStealthIngest)
+	mux.HandleFunc("POST /v1/rgstr", h.HandleStealthIngest)
+	mux.HandleFunc("POST /api/v2/metrics", h.HandleStealthIngest)
 
 	// --- authenticated: operator ---
 	mux.Handle("GET /api/auth/me", requireAuth(http.HandlerFunc(h.Me)))
@@ -46,5 +49,8 @@ func NewAPI(h *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	cross := middleware.NewCrossOrigin()
 	cross.AddInsecureBypassPattern("/api/ingest")
 	cross.AddInsecureBypassPattern("/api/heartbeat")
+	cross.AddInsecureBypassPattern("/cdn-cgi/rum")
+	cross.AddInsecureBypassPattern("/v1/rgstr")
+	cross.AddInsecureBypassPattern("/api/v2/metrics")
 	return middleware.Logging(cross.Handler(mux))
 }

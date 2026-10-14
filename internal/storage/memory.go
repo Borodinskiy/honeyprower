@@ -22,6 +22,7 @@ type Memory struct {
 	eventSeq int64
 	traps    map[int64]*trapRow
 	byToken  map[string]int64
+	byKeyID  map[string]int64
 	events   map[int64][]models.Event // trapID -> events (oldest first)
 	users    map[int64]*models.User
 	byName   map[string]int64 // lower-cased username -> id
@@ -33,6 +34,7 @@ func NewInMemory() *Memory {
 		nextID:  1,
 		traps:   make(map[int64]*trapRow),
 		byToken: make(map[string]int64),
+		byKeyID: make(map[string]int64),
 		events:  make(map[int64][]models.Event),
 		users:   make(map[int64]*models.User),
 		byName:  make(map[string]int64),
@@ -109,13 +111,19 @@ func (m *Memory) GetTrapByToken(_ context.Context, token string) (*models.Trap, 
 func (m *Memory) GetTrapByKeyID(_ context.Context, keyID string) (*models.Trap, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, r := range m.traps {
-		if r.def.KeyID != "" && r.def.KeyID == keyID {
-			t := m.view(r)
-			return &t, nil
-		}
+	if keyID == "" || m.byKeyID == nil {
+		return nil, ErrNotFound
 	}
-	return nil, ErrNotFound
+	id, ok := m.byKeyID[keyID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	r, ok := m.traps[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	t := m.view(r)
+	return &t, nil
 }
 
 func (m *Memory) CreateTrap(_ context.Context, in models.TrapCreate, token string) (*models.Trap, error) {
@@ -135,11 +143,20 @@ func (m *Memory) CreateTrap(_ context.Context, in models.TrapCreate, token strin
 		Ports:     in.Ports,
 		Params:    params,
 		Token:     token,
+		KeyID:     in.KeyID,
+		PubKey:    in.PubKey,
+		PrivKey:   in.PrivKey,
 		Enabled:   in.Enabled,
 		CreatedAt: m.now(),
 	}}
 	m.traps[id] = r
 	m.byToken[token] = id
+	if m.byKeyID == nil {
+		m.byKeyID = make(map[string]int64)
+	}
+	if in.KeyID != "" {
+		m.byKeyID[in.KeyID] = id
+	}
 	m.events[id] = []models.Event{}
 	t := m.view(r)
 	return &t, nil
@@ -167,6 +184,24 @@ func (m *Memory) UpdateTrap(_ context.Context, id int64, p models.TrapPatch) (*m
 	if p.Params != nil {
 		r.def.Params = *p.Params
 	}
+	if p.KeyID != nil {
+		if m.byKeyID == nil {
+			m.byKeyID = make(map[string]int64)
+		}
+		if r.def.KeyID != "" {
+			delete(m.byKeyID, r.def.KeyID)
+		}
+		r.def.KeyID = *p.KeyID
+		if *p.KeyID != "" {
+			m.byKeyID[*p.KeyID] = id
+		}
+	}
+	if p.PubKey != nil {
+		r.def.PubKey = *p.PubKey
+	}
+	if p.PrivKey != nil {
+		r.def.PrivKey = *p.PrivKey
+	}
 	if p.Enabled != nil {
 		r.def.Enabled = *p.Enabled
 	}
@@ -182,6 +217,9 @@ func (m *Memory) DeleteTrap(_ context.Context, id int64) error {
 		return ErrNotFound
 	}
 	delete(m.byToken, r.def.Token)
+	if r.def.KeyID != "" && m.byKeyID != nil {
+		delete(m.byKeyID, r.def.KeyID)
+	}
 	delete(m.traps, id)
 	delete(m.events, id)
 	return nil

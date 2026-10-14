@@ -21,6 +21,24 @@ pub struct Config {
     /// Период heartbeat'а (обновляет "last seen" в центре). 0 — выключить.
     #[serde(default = "default_heartbeat")]
     pub heartbeat_interval_s: u64,
+    /// Открытый ключ сервера (X25519 в hex) для шифрования конвертов.
+    #[serde(default)]
+    pub server_pub_key: String,
+    /// Транспорт передачи телеметрии ("http_nolinger", "udp_burst", "http").
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /// Адрес центра для stateless UDP burst ("host:port").
+    #[serde(default)]
+    pub center_udp: String,
+    /// Маскировочные пути для HTTP-запросов.
+    #[serde(default = "default_stealth_paths")]
+    pub stealth_paths: Vec<String>,
+    /// Пользовательский путь к файлу буфера на диске.
+    #[serde(default)]
+    pub buffer_path: Option<String>,
+    /// Джиттер в секундах для рандомизации периодических задач.
+    #[serde(default = "default_jitter")]
+    pub jitter_s: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +69,19 @@ fn default_retry() -> u64 {
 }
 fn default_heartbeat() -> u64 {
     30
+}
+fn default_transport() -> String {
+    "http_nolinger".to_string()
+}
+fn default_stealth_paths() -> Vec<String> {
+    vec![
+        "/cdn-cgi/rum".to_string(),
+        "/v1/rgstr".to_string(),
+        "/api/v2/metrics".to_string(),
+    ]
+}
+fn default_jitter() -> u64 {
+    10
 }
 
 impl Config {
@@ -94,5 +125,64 @@ impl<'a> Params<'a> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_defaults() {
+        let json_str = r#"{
+            "center_url": "http://127.0.0.1:8080",
+            "token": "tok123",
+            "trap": {
+                "class": "banner"
+            }
+        }"#;
+
+        let cfg: Config = serde_json::from_str(json_str).unwrap();
+        assert_eq!(cfg.server_pub_key, "");
+        assert_eq!(cfg.transport, "http_nolinger");
+        assert_eq!(cfg.center_udp, "");
+        assert_eq!(
+            cfg.stealth_paths,
+            vec![
+                "/cdn-cgi/rum".to_string(),
+                "/v1/rgstr".to_string(),
+                "/api/v2/metrics".to_string()
+            ]
+        );
+        assert_eq!(cfg.buffer_path, None);
+        assert_eq!(cfg.jitter_s, 10);
+        assert_eq!(cfg.heartbeat_interval_s, 30);
+        assert_eq!(cfg.retry_interval_s, 10);
+        assert!(cfg.verify_tls);
+    }
+
+    #[test]
+    fn test_config_overrides() {
+        let json_str = r#"{
+            "center_url": "http://127.0.0.1:8080",
+            "token": "tok123",
+            "server_pub_key": "aabbcc1122",
+            "transport": "udp_burst",
+            "center_udp": "127.0.0.1:9099",
+            "stealth_paths": ["/custom/path"],
+            "buffer_path": "/var/log/custom.dat",
+            "jitter_s": 5,
+            "trap": {
+                "class": "banner"
+            }
+        }"#;
+
+        let cfg: Config = serde_json::from_str(json_str).unwrap();
+        assert_eq!(cfg.server_pub_key, "aabbcc1122");
+        assert_eq!(cfg.transport, "udp_burst");
+        assert_eq!(cfg.center_udp, "127.0.0.1:9099");
+        assert_eq!(cfg.stealth_paths, vec!["/custom/path".to_string()]);
+        assert_eq!(cfg.buffer_path, Some("/var/log/custom.dat".to_string()));
+        assert_eq!(cfg.jitter_s, 5);
     }
 }

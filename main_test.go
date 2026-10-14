@@ -203,3 +203,28 @@ func TestFullAuthSessionLifecycle(t *testing.T) {
 		t.Fatalf("expected redirect to /login.html after logout, got %d to %s", recDashAfter.Code, recDashAfter.Header().Get("Location"))
 	}
 }
+
+func TestStealthRoutesInWebMux(t *testing.T) {
+	store := storage.NewInMemory()
+	authMgr := auth.NewManager()
+	h := handlers.New(store, authMgr)
+	apiHandler := router.NewAPI(h, authMgr)
+
+	cfg := &config.Config{
+		WebAddr:   ":8080",
+		APIAddr:   ":8081",
+		StaticDir: t.TempDir(),
+	}
+	webMux := NewWebMux(cfg, authMgr, apiHandler)
+
+	stealthPaths := []string{"/cdn-cgi/rum", "/v1/rgstr", "/api/v2/metrics"}
+	for _, p := range stealthPaths {
+		req := httptest.NewRequest("POST", p, strings.NewReader("dummy-raw-data"))
+		req.Header.Set("Content-Type", "application/octet-stream")
+		rec := httptest.NewRecorder()
+		webMux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Errorf("expected 204 No Content for %s, got %d: %s", p, rec.Code, rec.Body.String())
+		}
+	}
+}

@@ -110,6 +110,9 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 	webMux := http.NewServeMux()
 	if proxy != nil {
 		webMux.Handle("/api/", proxy)
+		webMux.Handle("/cdn-cgi/rum", proxy)
+		webMux.Handle("/v1/rgstr", proxy)
+		webMux.Handle("/api/v2/metrics", proxy)
 	}
 
 	isAuthorized := func(r *http.Request) bool {

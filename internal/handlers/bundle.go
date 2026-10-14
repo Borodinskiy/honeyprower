@@ -28,6 +28,10 @@ type agentTrap struct {
 type agentConfig struct {
 	CenterURL     string    `json:"center_url"`
 	Token         string    `json:"token"`
+	ServerPubKey  string    `json:"server_pub_key,omitempty"`
+	Transport     string    `json:"transport,omitempty"`
+	StealthPaths  []string  `json:"stealth_paths,omitempty"`
+	JitterS       int       `json:"jitter_s,omitempty"`
 	VerifyTLS     bool      `json:"verify_tls"`
 	RetryInterval int       `json:"retry_interval_s"`
 	Trap          agentTrap `json:"trap"`
@@ -41,6 +45,10 @@ func (h *Handlers) buildConfig(r *http.Request, t *models.Trap) agentConfig {
 	return agentConfig{
 		CenterURL:     h.centerURL(r),
 		Token:         t.Token,
+		ServerPubKey:  t.PubKey,
+		Transport:     "http_nolinger",
+		StealthPaths:  []string{"/cdn-cgi/rum", "/v1/rgstr", "/api/v2/metrics"},
+		JitterS:       10,
 		VerifyTLS:     true,
 		RetryInterval: 10,
 		Trap: agentTrap{

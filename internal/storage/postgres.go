@@ -80,7 +80,7 @@ func (p *Postgres) Close() error {
 // ---------------- traps ----------------
 
 const trapCols = `
-	t.id, t.name, t.class, t.bind, t.port, t.ports, t.params, t.token, t.enabled, t.last_seen, t.created_at,
+	t.id, t.name, t.class, t.bind, t.port, t.ports, t.params, t.token, t.key_id, t.pub_key, t.priv_key, t.enabled, t.last_seen, t.created_at,
 	(SELECT COUNT(*) FROM events e WHERE e.trap_id = t.id),
 	(SELECT COUNT(*) FROM events e WHERE e.trap_id = t.id AND e.event_type IN ('auth','scan','token')),
 	(SELECT MAX(ts) FROM events e WHERE e.trap_id = t.id)`
@@ -91,7 +91,8 @@ func scanTrap(row interface{ Scan(...any) error }) (*models.Trap, error) {
 	var lastSeen sql.NullTime
 	var lastTS sql.NullFloat64
 	if err := row.Scan(
-		&t.ID, &t.Name, &t.Class, &t.Bind, &t.Port, &t.Ports, &params, &t.Token, &t.Enabled,
+		&t.ID, &t.Name, &t.Class, &t.Bind, &t.Port, &t.Ports, &params, &t.Token,
+		&t.KeyID, &t.PubKey, &t.PrivKey, &t.Enabled,
 		&lastSeen, &t.CreatedAt, &t.TotalEvents, &t.Warnings, &lastTS,
 	); err != nil {
 		return nil, err
@@ -146,7 +147,15 @@ func (p *Postgres) GetTrapByToken(ctx context.Context, token string) (*models.Tr
 }
 
 func (p *Postgres) GetTrapByKeyID(ctx context.Context, keyID string) (*models.Trap, error) {
-	return nil, ErrNotFound
+	if keyID == "" {
+		return nil, ErrNotFound
+	}
+	row := p.db.QueryRowContext(ctx, `SELECT `+trapCols+` FROM traps t WHERE t.key_id = $1`, keyID)
+	t, err := scanTrap(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return t, err
 }
 
 func (p *Postgres) CreateTrap(ctx context.Context, in models.TrapCreate, token string) (*models.Trap, error) {
@@ -156,10 +165,10 @@ func (p *Postgres) CreateTrap(ctx context.Context, in models.TrapCreate, token s
 	}
 	var id int64
 	err := p.db.QueryRowContext(ctx, `
-		INSERT INTO traps (name, class, bind, port, ports, params, token, enabled)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO traps (name, class, bind, port, ports, params, token, key_id, pub_key, priv_key, enabled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id
-	`, in.Name, in.Class, in.Bind, in.Port, in.Ports, []byte(params), token, in.Enabled).Scan(&id)
+	`, in.Name, in.Class, in.Bind, in.Port, in.Ports, []byte(params), token, in.KeyID, in.PubKey, in.PrivKey, in.Enabled).Scan(&id)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyExists
@@ -192,6 +201,15 @@ func (p *Postgres) UpdateTrap(ctx context.Context, id int64, patch models.TrapPa
 	}
 	if patch.Params != nil {
 		add("params", []byte(*patch.Params))
+	}
+	if patch.KeyID != nil {
+		add("key_id", *patch.KeyID)
+	}
+	if patch.PubKey != nil {
+		add("pub_key", *patch.PubKey)
+	}
+	if patch.PrivKey != nil {
+		add("priv_key", *patch.PrivKey)
 	}
 	if patch.Enabled != nil {
 		add("enabled", *patch.Enabled)
@@ -361,7 +379,7 @@ func (p *Postgres) GetStats(ctx context.Context) (*models.Stats, error) {
 	err := p.db.QueryRowContext(ctx, `
 		SELECT
 			COALESCE(SUM(CASE WHEN enabled THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN last_seen >= NOW() - INTERVAL '90 seconds' THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN last_seen >= NOW() - INTERVAL '120 seconds' THEN 1 ELSE 0 END), 0)
 		FROM traps
 	`).Scan(&s.ActiveTraps, &s.OnlineTraps)
 	if err != nil {

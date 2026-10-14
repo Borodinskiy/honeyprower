@@ -1,21 +1,49 @@
 //! Отправка событий в центр. Канал односторонний: агент только шлёт.
 //!
-//! Устойчивость к потере связи (FR-A4): события копятся в буфере и в файле на
-//! диске; пока центр недоступен, агент их держит и досылает при восстановлении.
-//! HTTP-клиент живёт в отдельном потоке, чтобы блокирующая сеть не трогала
-//! асинхронные ловушки.
+//! Устойчивость к потере связи (FR-A4): события копятся в зашифрованном буфере
+//! на диске (Base64-строки бинарных конвертов, без открытого JSON).
+//! Поддерживаются скрытные транспорты:
+//! - SO_LINGER=0 HTTP без TIME_WAIT в `ss`/`netstat` (send_http_nolinger)
+//! - Stateless UDP burst (send_udp_burst)
+//! - Джиттер и piggybacking для Heartbeat (сброс таймера при реальной передаче событий).
 
 use crate::config::Config;
 use crate::event::Event;
+use rand::Rng;
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_BUFFER: usize = 50_000;
+
+static LAST_INGEST_TS: AtomicU64 = AtomicU64::new(0);
+static LAST_INGEST_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Фиксирует успешную отправку телеметрии (ingest), сбрасывая таймер heartbeat (piggybacking).
+pub fn record_ingest_sent() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    LAST_INGEST_TS.store(now, Ordering::SeqCst);
+    LAST_INGEST_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Возвращает Unix-timestamp (в секундах) последней успешной отправки телеметрии.
+pub fn last_ingest_sent() -> u64 {
+    LAST_INGEST_TS.load(Ordering::SeqCst)
+}
+
+/// Возвращает монотонный счетчик успешных отправок телеметрии.
+pub fn last_ingest_count() -> u64 {
+    LAST_INGEST_COUNT.load(Ordering::SeqCst)
+}
 
 #[derive(Clone)]
 pub struct EventSink {
@@ -36,47 +64,391 @@ impl EventSink {
     }
 }
 
+/// Отправка конверта через HTTP POST без сохранения TIME_WAIT (SO_LINGER = 0).
+/// При закрытии сокета ядро отправляет TCP RST, не оставляя соединений в ss / netstat.
+pub fn send_http_nolinger(host_port: &str, path: &str, envelope: &[u8]) -> Result<(), String> {
+    let host_hdr = host_port
+        .strip_prefix("http://")
+        .or_else(|| host_port.strip_prefix("https://"))
+        .unwrap_or(host_port);
+    let host_hdr = host_hdr.split('/').next().unwrap_or(host_hdr);
+
+    let host_with_port = if !host_hdr.contains(':') {
+        if host_port.starts_with("https://") {
+            format!("{host_hdr}:443")
+        } else {
+            format!("{host_hdr}:80")
+        }
+    } else {
+        host_hdr.to_string()
+    };
+
+    let addrs: Vec<std::net::SocketAddr> = host_with_port
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {host_with_port} failed: {e}"))?
+        .collect();
+
+    let addr = addrs
+        .into_iter()
+        .find(|a| a.is_ipv4())
+        .ok_or_else(|| format!("no IPv4 address found for {host_with_port}"))?;
+
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .map_err(|e| format!("socket creation failed: {e}"))?;
+
+    socket
+        .set_linger(Some(Duration::ZERO))
+        .map_err(|e| format!("set linger failed: {e}"))?;
+
+    let _ = socket.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = socket.set_write_timeout(Some(Duration::from_secs(10)));
+
+    socket
+        .connect(&addr.into())
+        .map_err(|e| format!("connect to {addr} failed: {e}"))?;
+
+    let mut stream: std::net::TcpStream = socket.into();
+
+    let req_headers = format!(
+        "POST {} HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        path,
+        host_hdr,
+        envelope.len()
+    );
+
+    stream
+        .write_all(req_headers.as_bytes())
+        .map_err(|e| format!("write headers failed: {e}"))?;
+
+    if !envelope.is_empty() {
+        stream
+            .write_all(envelope)
+            .map_err(|e| format!("write body failed: {e}"))?;
+    }
+    stream.flush().map_err(|e| format!("flush failed: {e}"))?;
+
+    let mut reader = BufReader::new(&mut stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|e| format!("read status line failed: {e}"))?;
+
+    let parts: Vec<&str> = status_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err(format!("malformed HTTP status line: {status_line:?}"));
+    }
+    let status_code: u16 = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid HTTP status code in: {status_line:?}"))?;
+
+    loop {
+        let mut header_line = String::new();
+        let n = reader
+            .read_line(&mut header_line)
+            .map_err(|e| format!("read header line failed: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        let trimmed = header_line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+    }
+
+    if status_code == 200 || status_code == 204 {
+        Ok(())
+    } else {
+        Err(format!("server returned HTTP status {status_code}"))
+    }
+}
+
+/// Одиночная отправка конверта через UDP без вызова connect() (stateless burst).
+pub fn send_udp_burst(udp_target: &str, envelope: &[u8]) -> Result<(), String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("udp bind failed: {e}"))?;
+    socket
+        .send_to(envelope, udp_target)
+        .map_err(|e| format!("udp send_to {udp_target} failed: {e}"))?;
+    Ok(())
+}
+
+/// Сохраняет зашифрованный бинарный конверт как Base64-строку в конец файла буфера.
+pub fn append_encrypted_buffer(path: impl AsRef<Path>, envelope: &[u8]) -> Result<(), String> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(envelope);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.as_ref())
+        .map_err(|e| format!("open buffer for append: {e}"))?;
+    writeln!(file, "{b64}").map_err(|e| format!("write to buffer: {e}"))?;
+    file.flush().map_err(|e| format!("flush buffer: {e}"))?;
+    Ok(())
+}
+
+/// Загружает сохраненные Base64-строки конвертов из файла буфера на диске.
+pub fn load_encrypted_buffer(path: impl AsRef<Path>) -> Result<Vec<Vec<u8>>, String> {
+    use base64::Engine;
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = File::open(path).map_err(|e| format!("open buffer {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for (idx, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|e| format!("read buffer line {idx}: {e}"))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(trimmed)
+            .map_err(|e| format!("base64 decode line {idx}: {e}"))?;
+        out.push(bytes);
+    }
+    Ok(out)
+}
+
+/// Перезаписывает файл буфера текущим списком конвертов в формате Base64 (по строке на конверт).
+pub fn persist_encrypted_buffer<I, B>(path: impl AsRef<Path>, envelopes: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+{
+    use base64::Engine;
+    let path = path.as_ref();
+    let tmp = path.with_extension("tmp");
+    let mut file = File::create(&tmp).map_err(|e| format!("create tmp buffer: {e}"))?;
+    for env in envelopes {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(env.as_ref());
+        writeln!(file, "{b64}").map_err(|e| format!("write tmp buffer: {e}"))?;
+    }
+    file.flush().map_err(|e| format!("flush tmp buffer: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename buffer: {e}"))?;
+    Ok(())
+}
+
+fn extract_host_port(url: &str) -> String {
+    let s = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let s = s.split('/').next().unwrap_or(s);
+    if !s.contains(':') {
+        if url.starts_with("https://") {
+            format!("{s}:443")
+        } else {
+            format!("{s}:80")
+        }
+    } else {
+        s.to_string()
+    }
+}
+
+fn pick_path(cfg: &Config) -> &str {
+    if !cfg.stealth_paths.is_empty() {
+        let idx = rand::thread_rng().gen_range(0..cfg.stealth_paths.len());
+        &cfg.stealth_paths[idx]
+    } else {
+        "/api/ingest"
+    }
+}
+
+fn send_envelope(cfg: &Config, agent: &ureq::Agent, envelope: &[u8]) -> Result<(), String> {
+    match cfg.transport.as_str() {
+        "udp_burst" => {
+            if cfg.center_udp.is_empty() {
+                return Err("center_udp is not configured for udp_burst transport".to_string());
+            }
+            send_udp_burst(&cfg.center_udp, envelope)
+        }
+        "http_nolinger" => {
+            let host_port = extract_host_port(&cfg.center_url);
+            let path = pick_path(cfg);
+            send_http_nolinger(&host_port, path, envelope)
+        }
+        _ => {
+            let url = cfg.ingest_url();
+            let content_type = if !cfg.server_pub_key.is_empty() {
+                "application/octet-stream"
+            } else {
+                "application/json"
+            };
+            let res = agent
+                .post(&url)
+                .set("Content-Type", content_type)
+                .set("X-HF-Token", &cfg.token)
+                .send_bytes(envelope);
+            match res {
+                Ok(_) => Ok(()),
+                Err(ureq::Error::Status(code, _)) if code == 401 || code == 404 => {
+                    Err(format!("center rejected envelope ({code})"))
+                }
+                Err(e) => Err(format!("ureq error: {e}")),
+            }
+        }
+    }
+}
+
+fn flush_envelopes(
+    cfg: &Config,
+    agent: &ureq::Agent,
+    buffer_path: &Path,
+    pending: &mut VecDeque<Vec<u8>>,
+) -> usize {
+    let mut sent = 0;
+    while let Some(env) = pending.front() {
+        match send_envelope(cfg, agent, env) {
+            Ok(_) => {
+                pending.pop_front();
+                sent += 1;
+                record_ingest_sent();
+            }
+            Err(e) => {
+                if e.contains("rejected") || e.contains("401") || e.contains("404") {
+                    eprintln!("[sender] центр отверг конверт ({e}), отбрасываю");
+                    pending.pop_front();
+                    sent += 1;
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+    if sent > 0 {
+        let _ = persist_encrypted_buffer(buffer_path, &*pending);
+    }
+    sent
+}
+
+fn handle_events(
+    cfg: &Config,
+    agent: &ureq::Agent,
+    buffer_path: &Path,
+    pending: &mut VecDeque<Vec<u8>>,
+    events: Vec<Event>,
+) {
+    if events.is_empty() {
+        return;
+    }
+
+    let envelopes_to_send: Vec<Vec<u8>> = if !cfg.server_pub_key.is_empty() {
+        match crate::crypto::seal_envelope(&cfg.server_pub_key, &cfg.token, "ingest", &events) {
+            Ok(env) => vec![env],
+            Err(e) => {
+                eprintln!("[sender] ошибка seal_envelope: {e}");
+                return;
+            }
+        }
+    } else {
+        events
+            .iter()
+            .filter_map(|e| serde_json::to_vec(e).ok())
+            .collect()
+    };
+
+    for env in envelopes_to_send {
+        if pending.is_empty() {
+            match send_envelope(cfg, agent, &env) {
+                Ok(_) => {
+                    record_ingest_sent();
+                }
+                Err(_) => {
+                    if pending.len() >= MAX_BUFFER {
+                        pending.pop_front();
+                    }
+                    let _ = append_encrypted_buffer(buffer_path, &env);
+                    pending.push_back(env);
+                }
+            }
+        } else {
+            if pending.len() >= MAX_BUFFER {
+                pending.pop_front();
+            }
+            let _ = append_encrypted_buffer(buffer_path, &env);
+            pending.push_back(env);
+        }
+    }
+
+    if !pending.is_empty() {
+        flush_envelopes(cfg, agent, buffer_path, pending);
+    }
+}
+
 /// Запускает поток-отправитель и возвращает «раковину», которую раздают ловушкам.
 pub fn start(cfg: Config, buffer_path: PathBuf) -> EventSink {
+    let buffer_path = cfg
+        .buffer_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or(buffer_path);
+
     let (tx, rx) = mpsc::channel::<Event>();
     thread::spawn(move || {
-        let mut buf: VecDeque<Event> = load_buffer(&buffer_path);
-        if !buf.is_empty() {
-            eprintln!("[sender] восстановлено {} событий из буфера", buf.len());
-        }
-        let url = cfg.ingest_url();
+        let mut pending: VecDeque<Vec<u8>> = match load_encrypted_buffer(&buffer_path) {
+            Ok(loaded) => {
+                if !loaded.is_empty() {
+                    eprintln!("[sender] восстановлено {} конвертов из буфера", loaded.len());
+                }
+                loaded.into()
+            }
+            Err(_) => {
+                let legacy = load_buffer(&buffer_path);
+                let mut conv = VecDeque::new();
+                if !cfg.server_pub_key.is_empty() {
+                    let evs: Vec<Event> = legacy.into_iter().collect();
+                    if let Ok(env) =
+                        crate::crypto::seal_envelope(&cfg.server_pub_key, &cfg.token, "ingest", &evs)
+                    {
+                        conv.push_back(env);
+                    }
+                } else {
+                    for ev in legacy {
+                        if let Ok(bytes) = serde_json::to_vec(&ev) {
+                            conv.push_back(bytes);
+                        }
+                    }
+                }
+                conv
+            }
+        };
+
         let agent = build_agent(cfg.verify_tls);
         let retry = Duration::from_secs(cfg.retry_interval_s.max(1));
-        let mut dirty = false;
+
+        if !pending.is_empty() {
+            flush_envelopes(&cfg, &agent, &buffer_path, &mut pending);
+        }
 
         loop {
             match rx.recv_timeout(retry) {
                 Ok(ev) => {
-                    if buf.len() >= MAX_BUFFER {
-                        buf.pop_front(); // при переполнении теряем самые старые
+                    let mut incoming = vec![ev];
+                    while let Ok(next) = rx.try_recv() {
+                        incoming.push(next);
                     }
-                    buf.push_back(ev);
-                    dirty = true;
+                    handle_events(&cfg, &agent, &buffer_path, &mut pending, incoming);
                 }
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    if !pending.is_empty() {
+                        flush_envelopes(&cfg, &agent, &buffer_path, &mut pending);
+                    }
+                }
                 Err(RecvTimeoutError::Disconnected) => {
-                    flush(&agent, &url, &cfg.token, &mut buf);
-                    persist(&buffer_path, &buf);
+                    if !pending.is_empty() {
+                        flush_envelopes(&cfg, &agent, &buffer_path, &mut pending);
+                    }
                     return;
                 }
-            }
-            // Подбираем всё, что уже скопилось, одним заходом.
-            while let Ok(ev) = rx.try_recv() {
-                if buf.len() >= MAX_BUFFER {
-                    buf.pop_front();
-                }
-                buf.push_back(ev);
-                dirty = true;
-            }
-            let sent = flush(&agent, &url, &cfg.token, &mut buf);
-            if sent > 0 || dirty {
-                persist(&buffer_path, &buf);
-                dirty = false;
             }
         }
     });
@@ -85,6 +457,9 @@ pub fn start(cfg: Config, buffer_path: PathBuf) -> EventSink {
 
 /// Периодический heartbeat: обновляет "last seen" ловушки в центре между
 /// атаками, чтобы на дашборде был виден статус online (FR-A3).
+///
+/// Интервал вычисляется как interval + rand::thread_rng().gen_range(0..=cfg.jitter_s).
+/// При успешной отправке реальных событий (ingest) таймер сбрасывается (piggybacking).
 pub fn start_heartbeat(cfg: Config) {
     if cfg.heartbeat_interval_s == 0 {
         return;
@@ -92,81 +467,75 @@ pub fn start_heartbeat(cfg: Config) {
     thread::spawn(move || {
         let agent = build_agent(cfg.verify_tls);
         let url = cfg.heartbeat_url();
-        let period = Duration::from_secs(cfg.heartbeat_interval_s);
+        let host_port = extract_host_port(&cfg.center_url);
+
         loop {
-            let _ = agent
-                .post(&url)
-                .set("X-HF-Token", &cfg.token)
-                .send_string("");
-            thread::sleep(period);
+            let jitter = if cfg.jitter_s > 0 {
+                rand::thread_rng().gen_range(0..=cfg.jitter_s)
+            } else {
+                0
+            };
+            let period_secs = cfg.heartbeat_interval_s + jitter;
+            let period = Duration::from_secs(period_secs);
+            let start_instant = Instant::now();
+            let start_count = last_ingest_count();
+            let check_interval = Duration::from_millis(100);
+
+            let mut piggybacked = false;
+            while start_instant.elapsed() < period {
+                let remaining = period.saturating_sub(start_instant.elapsed());
+                thread::sleep(remaining.min(check_interval));
+                if last_ingest_count() > start_count {
+                    // При успешной отправке реальных событий (ingest) таймер heartbeat сбрасывается (piggybacking)
+                    piggybacked = true;
+                    break;
+                }
+            }
+
+            if piggybacked {
+                continue;
+            }
+
+            // Отправка heartbeat
+            if cfg.transport == "http_nolinger" && !cfg.server_pub_key.is_empty() {
+                if let Ok(env) =
+                    crate::crypto::seal_envelope(&cfg.server_pub_key, &cfg.token, "heartbeat", &[])
+                {
+                    let path = pick_path(&cfg);
+                    let _ = send_http_nolinger(&host_port, path, &env);
+                }
+            } else if cfg.transport == "udp_burst" && !cfg.center_udp.is_empty() {
+                if let Ok(env) =
+                    crate::crypto::seal_envelope(&cfg.server_pub_key, &cfg.token, "heartbeat", &[])
+                {
+                    let _ = send_udp_burst(&cfg.center_udp, &env);
+                }
+            } else {
+                let _ = agent
+                    .post(&url)
+                    .set("X-HF-Token", &cfg.token)
+                    .send_string("");
+            }
         }
     });
 }
 
 fn build_agent(_verify_tls: bool) -> ureq::Agent {
-    // http и https с доверенным сертификатом. Самоподписанный TLS центра —
-    // отдельный шаг (маскировка канала), пока его не трогаем.
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
 }
 
-/// Отправляет события из начала буфера, пока центр отвечает. Возвращает число отправленных.
-fn flush(agent: &ureq::Agent, url: &str, token: &str, buf: &mut VecDeque<Event>) -> usize {
-    let mut sent = 0;
-    while let Some(ev) = buf.front() {
-        let body = match serde_json::to_string(ev) {
-            Ok(b) => b,
-            Err(_) => {
-                buf.pop_front(); // кривое событие не должно застревать навсегда
-                continue;
-            }
-        };
-        let res = agent
-            .post(url)
-            .set("Content-Type", "application/json")
-            .set("X-HF-Token", token)
-            .send_string(&body);
-        match res {
-            Ok(_) => {
-                buf.pop_front();
-                sent += 1;
-            }
-            Err(ureq::Error::Status(code, _)) if code == 401 || code == 404 => {
-                // Токен не признан: событие центру не нужно, отбрасываем, иначе встанет очередь.
-                eprintln!("[sender] центр отверг событие ({code}), отбрасываю");
-                buf.pop_front();
-            }
-            Err(_) => break, // центр недоступен — ждём следующего цикла
-        }
-    }
-    sent
-}
-
-fn persist(path: &PathBuf, buf: &VecDeque<Event>) {
-    let tmp = path.with_extension("tmp");
-    let mut f = match File::create(&tmp) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    for ev in buf {
-        if let Ok(line) = serde_json::to_string(ev) {
-            let _ = writeln!(f, "{line}");
-        }
-    }
-    let _ = f.flush();
-    let _ = std::fs::rename(&tmp, path);
-}
-
 fn load_buffer(path: &PathBuf) -> VecDeque<Event> {
     let mut out = VecDeque::new();
     if let Ok(f) = OpenOptions::new().read(true).open(path) {
         for line in BufReader::new(f).lines().map_while(Result::ok) {
-            if line.trim().is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(ev) = serde_json::from_str::<Event>(&line) {
+            if let Ok(ev) = serde_json::from_str::<Event>(trimmed) {
                 out.push_back(ev);
             }
         }
@@ -234,3 +603,192 @@ mod de {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_send_http_nolinger_204_success() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host_port = addr.to_string();
+        let path = "/v1/rgstr";
+        let envelope = b"binary-stealth-envelope-data-204";
+
+        let srv_host_port = host_port.clone();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            assert_eq!(request_line.trim(), "POST /v1/rgstr HTTP/1.1");
+
+            let mut content_length = 0usize;
+            let mut host_header = String::new();
+            let mut content_type = String::new();
+
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some(val) = trimmed.strip_prefix("Content-Length:") {
+                    content_length = val.trim().parse().unwrap();
+                } else if let Some(val) = trimmed.strip_prefix("Host:") {
+                    host_header = val.trim().to_string();
+                } else if let Some(val) = trimmed.strip_prefix("Content-Type:") {
+                    content_type = val.trim().to_string();
+                }
+            }
+
+            assert_eq!(host_header, srv_host_port);
+            assert_eq!(content_type, "application/octet-stream");
+            assert_eq!(content_length, envelope.len());
+
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(&body, envelope);
+
+            // Ответ 204 No Content
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let res = send_http_nolinger(&host_port, path, envelope);
+        assert!(res.is_ok(), "send_http_nolinger failed: {:?}", res.err());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_send_http_nolinger_200_success() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host_port = addr.to_string();
+        let path = "/cdn-cgi/rum";
+        let envelope = b"binary-stealth-envelope-data-200";
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            assert_eq!(request_line.trim(), "POST /cdn-cgi/rum HTTP/1.1");
+
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let mut body = vec![0u8; envelope.len()];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(&body, envelope);
+
+            // Ответ 200 OK
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let res = send_http_nolinger(&host_port, path, envelope);
+        assert!(res.is_ok(), "send_http_nolinger failed: {:?}", res.err());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_send_http_nolinger_error_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host_port = addr.to_string();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            loop {
+                line.clear();
+                let _ = reader.read_line(&mut line);
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n");
+            let _ = stream.flush();
+        });
+
+        let res = send_http_nolinger(&host_port, "/error", b"payload");
+        assert!(res.is_err());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_send_udp_burst_received() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = receiver.local_addr().unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let envelope = b"udp-envelope-burst-data-secret-12345";
+        let target = addr.to_string();
+
+        let res = send_udp_burst(&target, envelope);
+        assert!(res.is_ok(), "send_udp_burst failed: {:?}", res.err());
+
+        let mut buf = [0u8; 1024];
+        let (n, _src) = receiver.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], envelope);
+    }
+
+    #[test]
+    fn test_encrypted_buffer_save_and_load_base64() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!("test_buf_{}.dat", rand::random::<u64>()));
+
+        let env1 = b"first_secret_envelope_bytes".to_vec();
+        let env2 = b"second_secret_envelope_bytes".to_vec();
+
+        append_encrypted_buffer(&file_path, &env1).unwrap();
+        append_encrypted_buffer(&file_path, &env2).unwrap();
+
+        // Проверяем, что файл содержит Base64-строки и не содержит открытый текст
+        let mut raw_content = String::new();
+        File::open(&file_path)
+            .unwrap()
+            .read_to_string(&mut raw_content)
+            .unwrap();
+
+        assert!(!raw_content.contains("first_secret_envelope_bytes"));
+        assert!(!raw_content.contains("second_secret_envelope_bytes"));
+
+        let loaded = load_encrypted_buffer(&file_path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0], env1);
+        assert_eq!(loaded[1], env2);
+
+        // Проверяем перезапись через persist_encrypted_buffer
+        let env3 = b"third_envelope".to_vec();
+        persist_encrypted_buffer(&file_path, &[env3.clone()]).unwrap();
+
+        let loaded_after = load_encrypted_buffer(&file_path).unwrap();
+        assert_eq!(loaded_after, vec![env3]);
+
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_piggybacking_and_jitter() {
+        let initial_count = last_ingest_count();
+        record_ingest_sent();
+        assert!(last_ingest_count() > initial_count);
+        assert!(last_ingest_sent() > 0);
+    }
+}

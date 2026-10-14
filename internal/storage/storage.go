@@ -14,7 +14,7 @@ var (
 )
 
 // OnlineWindow — ловушка считается online, если присылала телеметрию не позже этого срока.
-const OnlineWindow = 90 * time.Second
+const OnlineWindow = 120 * time.Second
 
 // Storage is the abstraction the handlers use.
 // Swap Memory for Postgres / SQLite / Redis later without touching handlers.

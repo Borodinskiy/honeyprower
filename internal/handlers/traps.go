@@ -51,6 +51,14 @@ func (h *Handlers) CreateTrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
+	keyID, pubHex, privHex, err := GenerateTrapCrypto(token)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to generate trap crypto keys")
+		return
+	}
+	in.KeyID = keyID
+	in.PubKey = pubHex
+	in.PrivKey = privHex
 	trap, err := h.Store.CreateTrap(r.Context(), in, token)
 	if errors.Is(err, storage.ErrAlreadyExists) {
 		httpx.WriteError(w, http.StatusConflict, "trap token collision, retry")

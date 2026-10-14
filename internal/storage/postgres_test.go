@@ -34,6 +34,18 @@ func TestTrapStatus(t *testing.T) {
 	if got := trapStatus(&recent, now); got != "online" {
 		t.Errorf("recent -> %q; want online", got)
 	}
+	seen110 := now.Add(-110 * time.Second)
+	if got := trapStatus(&seen110, now); got != "online" {
+		t.Errorf("110s ago -> %q; want online", got)
+	}
+	seen120 := now.Add(-120 * time.Second)
+	if got := trapStatus(&seen120, now); got != "online" {
+		t.Errorf("120s ago -> %q; want online", got)
+	}
+	seen121 := now.Add(-121 * time.Second)
+	if got := trapStatus(&seen121, now); got != "offline" {
+		t.Errorf("121s ago -> %q; want offline", got)
+	}
 	old := now.Add(-10 * time.Minute)
 	if got := trapStatus(&old, now); got != "offline" {
 		t.Errorf("old -> %q; want offline", got)

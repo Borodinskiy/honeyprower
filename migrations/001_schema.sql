@@ -20,10 +20,15 @@ CREATE TABLE IF NOT EXISTS traps (
     ports VARCHAR(255) NOT NULL DEFAULT '',
     params JSONB NOT NULL DEFAULT '{}'::jsonb,
     token TEXT UNIQUE NOT NULL,
+    key_id VARCHAR(16) NOT NULL DEFAULT '',
+    pub_key TEXT NOT NULL DEFAULT '',
+    priv_key TEXT NOT NULL DEFAULT '',
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     last_seen TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS traps_key_id_idx ON traps (key_id);
 
 CREATE TABLE IF NOT EXISTS events (
     id BIGSERIAL PRIMARY KEY,
