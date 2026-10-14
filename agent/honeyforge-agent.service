@@ -1,0 +1,18 @@
+[Unit]
+Description=HoneyForge Agent Honeypot
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Environment="HF_CONFIG=/etc/honeyforge/config.json"
+ExecStart=/usr/local/bin/honeyforge-agent /etc/honeyforge/config.json
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

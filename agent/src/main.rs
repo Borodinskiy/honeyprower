@@ -50,7 +50,7 @@ async fn main() -> ExitCode {
         }
     };
 
-    let buffer_path = PathBuf::from(format!("{cfg_path}.buffer"));
+    let buffer_path = resolve_buffer_path();
     let sink = sender::start(cfg.clone(), buffer_path);
     sender::start_heartbeat(cfg.clone());
 
@@ -217,4 +217,54 @@ async fn udp_loop(trap: Arc<Trap>, bind: String, port: u16, sink: sender::EventS
 fn load_config(path: &str) -> Result<Config, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+pub fn resolve_buffer_path() -> PathBuf {
+    if let Ok(val) = std::env::var("HF_BUFFER_PATH") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    std::env::temp_dir().join("honeyforge-agent-buffer.dat")
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_resolve_buffer_path_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("HF_BUFFER_PATH");
+        assert_eq!(
+            resolve_buffer_path(),
+            std::env::temp_dir().join("honeyforge-agent-buffer.dat")
+        );
+    }
+
+    #[test]
+    fn test_resolve_buffer_path_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("HF_BUFFER_PATH", "/var/run/custom_buffer.dat");
+        assert_eq!(
+            resolve_buffer_path(),
+            PathBuf::from("/var/run/custom_buffer.dat")
+        );
+        std::env::remove_var("HF_BUFFER_PATH");
+    }
+
+    #[test]
+    fn test_resolve_buffer_path_empty_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("HF_BUFFER_PATH", "   ");
+        assert_eq!(
+            resolve_buffer_path(),
+            std::env::temp_dir().join("honeyforge-agent-buffer.dat")
+        );
+        std::env::remove_var("HF_BUFFER_PATH");
+    }
 }
