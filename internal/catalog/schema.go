@@ -69,6 +69,7 @@ func list(key, title, itemTitle, help string, summary []string, item ...Field) F
 }
 
 func (f Field) adv() Field        { f.Advanced = true; return f }
+func (f Field) def(v any) Field   { f.Default = v; return f }
 func (f Field) re() Field         { f.Regex = true; return f }
 func (f Field) hex() Field        { f.Hex = true; return f }
 func (f Field) ph(p string) Field { f.Placeholder = p; return f }
@@ -168,6 +169,19 @@ var schemas = map[string][]Field{
 		integer("max_hold_s", "Макс. время удержания, с", 3600, "", 1, 86400),
 		integer("max_line_length", "Макс. длина строки", 32, "", 3, 255).adv().when("mode", "ssh_banner", "http_headers"),
 		pConns,
+	},
+	"ssh": {
+		str("version", "Версия сервера", "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10",
+			"Строка идентификации, которую видит клиент и сканеры. Набор алгоритмов шифрования подобран под OpenSSH 8.9."),
+		integer("max_auth_tries", "Попыток входа до отключения", 6,
+			"Как MaxAuthTries в sshd (по умолчанию 6). Ключи из ssh-agent тоже считаются попытками.", 1, 100),
+		str("fail_delay_ms", "Задержка после неверного пароля, мс", "1800-2600",
+			"Настоящий sshd с PAM отвечает на неверный пароль через ~2 с. Мгновенный отказ выдаёт ловушку."),
+		text("auth_banner", "Баннер перед входом", "",
+			"Текст до ввода пароля (Banner в sshd_config). В Ubuntu по умолчанию пусто. "+escHelp).adv(),
+		text("host_key", "Ключ хоста (OpenSSH)", "",
+			"Пусто — ed25519-ключ выводится из токена ловушки и не меняется между запусками. Сюда можно вставить свой приватный ключ в формате OpenSSH.").adv(),
+		pIdle.def(120), pConns,
 	},
 	"honeytoken": {
 		list("tokens", "Ссылки-приманки", "Ссылка",

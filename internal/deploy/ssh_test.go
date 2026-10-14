@@ -337,7 +337,8 @@ func TestDeploy_RootSuccess(t *testing.T) {
 		"mkdir -p /etc/honeyforge && mv /tmp/hf_agent_cfg /etc/honeyforge/config.json && chmod 0644 /etc/honeyforge/config.json",
 		"cat > /tmp/hf_agent_svc",
 		"mv /tmp/hf_agent_svc /etc/systemd/system/honeyforge-agent.service && chmod 0644 /etc/systemd/system/honeyforge-agent.service",
-		"systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service",
+		activateCmd,
+		verifyCmd,
 	}
 
 	if len(server.commands) != len(expectedCommands) {
@@ -406,13 +407,13 @@ func TestDeploy_SudoSuccess(t *testing.T) {
 			sudoCmdCount++
 		}
 	}
-	if sudoCmdCount != 4 {
-		t.Errorf("expected 4 sudo commands (install bin, install cfg, install svc, systemctl), got %d: %v", sudoCmdCount, server.commands)
+	if sudoCmdCount != 5 {
+		t.Errorf("expected 5 sudo commands (install bin, install cfg, install svc, systemctl, verify), got %d: %v", sudoCmdCount, server.commands)
 	}
 
 	// Verify the sudo password passed on stdin
-	if len(server.sudoPasswords) != 4 {
-		t.Fatalf("expected 4 sudo password prompts, got %d", len(server.sudoPasswords))
+	if len(server.sudoPasswords) != 5 {
+		t.Fatalf("expected 5 sudo password prompts, got %d", len(server.sudoPasswords))
 	}
 	for i, pass := range server.sudoPasswords {
 		if pass != "rootpassword123" {
@@ -665,6 +666,32 @@ func TestDeploy_Errors(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "Job for honeyforge-agent.service failed") {
 			t.Errorf("expected error to contain stderr details, got: %v", err)
+		}
+	})
+
+	t.Run("agent not running after start reports journal", func(t *testing.T) {
+		server.mu.Lock()
+		server.failCommands["systemctl is-active"] = "status=216/GROUP"
+		server.mu.Unlock()
+
+		defer func() {
+			server.mu.Lock()
+			delete(server.failCommands, "systemctl is-active")
+			server.mu.Unlock()
+		}()
+
+		target := TargetConfig{
+			Host:     "127.0.0.1",
+			Port:     server.port,
+			Username: "root",
+			Password: "rootpass",
+		}
+		err := deployer.Deploy(context.Background(), target, Payload{BinaryPath: validBin})
+		if err == nil {
+			t.Fatal("expected verification error, got nil")
+		}
+		if !strings.Contains(err.Error(), "is not running") || !strings.Contains(err.Error(), "216/GROUP") {
+			t.Errorf("expected not-running error with journal, got: %v", err)
 		}
 	})
 
@@ -985,23 +1012,22 @@ func TestDeploy_Lifecycle_Uninstall(t *testing.T) {
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	expectedCmd := "systemctl stop honeyforge-agent.service 2>/dev/null; systemctl disable honeyforge-agent.service 2>/dev/null; rm -f /etc/systemd/system/honeyforge-agent.service /usr/local/bin/honeyforge-agent; rm -rf /etc/honeyforge; systemctl daemon-reload 2>/dev/null"
 	found := false
 	for _, cmd := range server.commands {
-		if cmd == expectedCmd {
+		if strings.Contains(cmd, "systemctl disable --now honeyforge-agent.service") || strings.Contains(cmd, "systemctl stop honeyforge-agent.service") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected uninstall command %q, got: %v", expectedCmd, server.commands)
+		t.Errorf("expected uninstall command, got: %v", server.commands)
 	}
 }
 
 func TestDeploy_Lifecycle_Uninstall_Failure(t *testing.T) {
 	server := newMockSSHServer(t)
 	server.allowedUsers["root"] = "rootpass"
-	server.failCommands["rm -f /etc/systemd/system"] = "read-only filesystem"
+	server.failCommands[removeCmd] = "read-only filesystem"
 	deployer := NewSSHDeployer()
 
 	target := TargetConfig{
@@ -1015,7 +1041,7 @@ func TestDeploy_Lifecycle_Uninstall_Failure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "failed to uninstall") {
+	if !strings.Contains(err.Error(), "failed to remove") && !strings.Contains(err.Error(), "failed to uninstall") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -1077,4 +1103,74 @@ func TestDeploy_HealthCheck(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected healthcheck timeout error, got nil")
 	}
+}
+
+func TestUndeploy_SudoSuccess(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["deployuser"] = "userpass"
+
+	deployer := NewSSHDeployer()
+	deployer.Timeout = 5 * time.Second
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "deployuser",
+		Password: "userpass",
+		UseSudo:  true,
+	}
+	if err := deployer.Undeploy(context.Background(), target); err != nil {
+		t.Fatalf("Undeploy failed: %v", err)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.commands) != 1 {
+		t.Fatalf("expected 1 command, got %d: %v", len(server.commands), server.commands)
+	}
+	cmd := server.commands[0]
+	if !strings.HasPrefix(cmd, "sudo -S -p ''") || !strings.Contains(cmd, "systemctl disable --now honeyforge-agent.service") {
+		t.Errorf("unexpected command: %q", cmd)
+	}
+	if len(server.sudoPasswords) != 1 || server.sudoPasswords[0] != "userpass" {
+		t.Errorf("sudo password not passed: %v", server.sudoPasswords)
+	}
+}
+
+func TestUndeploy_Errors(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+
+	deployer := NewSSHDeployer()
+	deployer.Timeout = 2 * time.Second
+
+	t.Run("missing host", func(t *testing.T) {
+		err := deployer.Undeploy(context.Background(), TargetConfig{Username: "root", Password: "rootpass"})
+		if err == nil || !strings.Contains(err.Error(), "host is required") {
+			t.Errorf("expected host error, got %v", err)
+		}
+	})
+
+	t.Run("wrong password", func(t *testing.T) {
+		err := deployer.Undeploy(context.Background(), TargetConfig{Host: "127.0.0.1", Port: server.port, Username: "root", Password: "nope"})
+		if err == nil || !strings.Contains(err.Error(), "handshake failed") {
+			t.Errorf("expected handshake error, got %v", err)
+		}
+	})
+
+	t.Run("rm failure reported", func(t *testing.T) {
+		server.mu.Lock()
+		server.failCommands[removeCmd] = "rm: cannot remove: Permission denied"
+		server.mu.Unlock()
+		defer func() {
+			server.mu.Lock()
+			delete(server.failCommands, removeCmd)
+			server.mu.Unlock()
+		}()
+
+		err := deployer.Undeploy(context.Background(), TargetConfig{Host: "127.0.0.1", Port: server.port, Username: "root", Password: "rootpass"})
+		if err == nil || !strings.Contains(err.Error(), "Permission denied") {
+			t.Errorf("expected rm error, got %v", err)
+		}
+	})
 }

@@ -386,3 +386,65 @@ async fn e2e_extra_traps() {
     let scan_ev = has_type(&evs_low, "scan").expect("нет события scan");
     assert_eq!(scan_ev.data["probe_signature"], "echo_probe");
 }
+
+// ----------------------------- ssh -----------------------------
+
+struct AcceptAnyHostKey;
+
+impl russh::client::Handler for AcceptAnyHostKey {
+    type Error = russh::Error;
+
+    async fn check_server_key(&mut self, _: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn ssh_logs_credentials_and_denies() {
+    let params = json!({ "fail_delay_ms": "0" });
+    let (_, evs) = run_tcp_script("ssh", params, |stream| async move {
+        let cfg = std::sync::Arc::new(russh::client::Config::default());
+        let mut h = russh::client::connect_stream(cfg, stream, AcceptAnyHostKey).await.unwrap();
+        for pass in ["hunter2", "toor"] {
+            let res = h.authenticate_password("root", pass).await.unwrap();
+            match res {
+                russh::client::AuthResult::Failure { remaining_methods, .. } => {
+                    // sshd даёт повторить пароль: метод не исчезает из списка
+                    assert!(remaining_methods.contains(&russh::MethodKind::Password));
+                }
+                russh::client::AuthResult::Success => panic!("ловушка не должна пускать"),
+            }
+        }
+        Vec::new()
+    })
+    .await;
+
+    let hs = has_type(&evs, "handshake").expect("нет события handshake");
+    assert!(hs.data["client_version"].as_str().unwrap().starts_with("SSH-2.0-"));
+    let auths: Vec<_> = evs.iter().filter(|e| e.event_type == "auth").collect();
+    assert_eq!(auths.len(), 2, "события: {evs:?}");
+    assert_eq!(auths[0].username.as_deref(), Some("root"));
+    assert_eq!(auths[0].password.as_deref(), Some("hunter2"));
+    assert_eq!(auths[1].password.as_deref(), Some("toor"));
+    assert_eq!(auths[1].data["attempt"], 2);
+    assert_eq!(auths[0].data["method"], "password");
+}
+
+#[test]
+fn ssh_host_key_is_stable_per_seed() {
+    let mk = |seed: &str| {
+        let mut cfg = trap_cfg("ssh", &json!({}));
+        cfg.key_seed = seed.to_string();
+        match Trap::build(&cfg).unwrap() {
+            Trap::Ssh(t) => t.host_fingerprint(),
+            _ => unreachable!(),
+        }
+    };
+    assert_eq!(mk("tok-a"), mk("tok-a"));
+    assert_ne!(mk("tok-a"), mk("tok-b"));
+}
+
+#[test]
+fn ssh_rejects_bad_version() {
+    assert!(Trap::build(&trap_cfg("ssh", &json!({ "version": "OpenSSH_8.9" }))).is_err());
+}

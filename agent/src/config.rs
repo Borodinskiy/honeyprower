@@ -56,6 +56,10 @@ pub struct TrapConfig {
     pub name: String,
     #[serde(default)]
     pub params: Value,
+    /// Секрет для ключей, которые должны переживать перезапуск (ключ хоста SSH).
+    /// В конфиге его нет: main подставляет токен ловушки.
+    #[serde(skip)]
+    pub key_seed: String,
 }
 
 impl TrapConfig {

@@ -11,6 +11,7 @@ pub mod low_extra;
 pub mod medium_extra;
 pub mod port_listener;
 pub mod scada;
+pub mod ssh;
 pub mod tarpit;
 pub mod udp;
 
@@ -33,6 +34,7 @@ pub enum Trap {
     HighInteraction(Arc<high_interaction::HighInteractionTrap>),
     LowExtra(Arc<low_extra::LowExtraTrap>),
     MediumExtra(Arc<medium_extra::MediumExtraTrap>),
+    Ssh(Arc<ssh::SshTrap>),
 }
 
 impl Trap {
@@ -51,6 +53,7 @@ impl Trap {
             "high_interaction" => Trap::HighInteraction(Arc::new(high_interaction::HighInteractionTrap::new(p)?)),
             "low_extra" => Trap::LowExtra(Arc::new(low_extra::LowExtraTrap::new(p)?)),
             "medium_extra" => Trap::MediumExtra(Arc::new(medium_extra::MediumExtraTrap::new(p)?)),
+            "ssh" => Trap::Ssh(Arc::new(ssh::SshTrap::new(p, &cfg.key_seed)?)),
             other => return Err(format!("неизвестный класс ловушки: {other}")),
         })
     }
@@ -85,7 +88,9 @@ impl Trap {
     }
 
     pub fn idle_timeout(&self, cfg: &TrapConfig) -> f64 {
-        Params(&cfg.params).float("idle_timeout", 30.0)
+        // SSH: человек вводит пароль медленно; 120 с — как LoginGraceTime в sshd.
+        let def = if matches!(self, Trap::Ssh(_)) { 120.0 } else { 30.0 };
+        Params(&cfg.params).float("idle_timeout", def)
     }
 
     pub fn hostname(&self, cfg: &TrapConfig) -> String {
@@ -101,6 +106,7 @@ impl Trap {
             Trap::Http(t) => t.handle(s).await,
             Trap::Tarpit(t) => t.handle(s).await,
             Trap::Honeytoken(t) => t.handle(s).await,
+            Trap::Ssh(t) => t.handle(s).await,
             Trap::Udp(_) => {}
             Trap::Iec104(t) => t.handle(s).await,
             Trap::Scada(t) => t.handle(s).await,

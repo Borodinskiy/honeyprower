@@ -54,6 +54,11 @@ var classes = []Class{
 		DefaultParams: raw(`{"banner":"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10\r\n","close_after_input":true}`),
 	},
 	{
+		ID: "ssh", Title: "SSH-сервер (OpenSSH)", Level: "Medium", Transport: "tcp", DefaultPort: 2222,
+		Description:   "Настоящий SSH-протокол: обмен ключами, шифрование, вход по паролю и ключу. Записывает логины, пароли и отпечатки ключей, отвечает «Permission denied». Клиент не отличит от OpenSSH.",
+		DefaultParams: raw(`{"version":"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10","max_auth_tries":6,"fail_delay_ms":"1800-2600"}`),
+	},
+	{
 		ID: "dialog", Title: "Диалоговый автомат", Level: "Medium", Transport: "tcp", DefaultPort: 2121,
 		Description:   "Текстовый протокол по regex-правилам: захват логинов, паролей, команд. Собирает FTP, SMTP, POP3, IMAP, Telnet, Redis.",
 		DefaultParams: raw(`{"greeting":"220 {hostname} ready\r\n","decoder":"line","default_response":"500 Unknown command\r\n","rules":[{"match":"^USER\\s+(.*)$","response":"331 Please specify the password.\r\n","capture":"username"},{"match":"^PASS\\s?(.*)$","response":"530 Login incorrect.\r\n","capture":"password"},{"match":"^QUIT","response":"221 Bye\r\n","close":true}]}`),

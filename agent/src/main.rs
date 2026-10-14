@@ -34,7 +34,7 @@ async fn main() -> ExitCode {
         .or_else(|| std::env::var("HF_CONFIG").ok())
         .unwrap_or_else(|| "config.json".to_string());
 
-    let cfg = match load_config(&cfg_path) {
+    let mut cfg = match load_config(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("конфиг {cfg_path}: {e}");
@@ -42,6 +42,7 @@ async fn main() -> ExitCode {
         }
     };
 
+    cfg.trap.key_seed = cfg.token.clone();
     let trap = match Trap::build(&cfg.trap) {
         Ok(t) => Arc::new(t),
         Err(e) => {

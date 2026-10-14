@@ -71,11 +71,13 @@ type ServiceStatus struct {
 	RawOutput string `json:"rawOutput,omitempty"`
 }
 
-// Deployer abstracts remote agent installation and lifecycle operations.
+// Deployer abstracts remote agent installation, lifecycle operations, and removal.
 type Deployer interface {
 	Deploy(ctx context.Context, target TargetConfig, payload Payload) error
 	Status(ctx context.Context, target TargetConfig) (*ServiceStatus, error)
 	Restart(ctx context.Context, target TargetConfig) error
 	Stop(ctx context.Context, target TargetConfig) error
 	Uninstall(ctx context.Context, target TargetConfig) error
+	// Undeploy stops the agent and removes its files from the target.
+	Undeploy(ctx context.Context, target TargetConfig) error
 }

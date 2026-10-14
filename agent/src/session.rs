@@ -81,6 +81,11 @@ impl Session {
             .session(&self.id)
     }
 
+    /// Канал событий — для обработчиков, которые живут в отдельной задаче (SSH).
+    pub fn sink(&self) -> EventSink {
+        self.sink.clone()
+    }
+
     pub fn emit(&self, ev: Event) {
         self.sink.emit(ev);
     }

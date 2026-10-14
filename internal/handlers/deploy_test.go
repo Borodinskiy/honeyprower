@@ -26,6 +26,7 @@ type mockDeployer struct {
 	restartFunc   func(ctx context.Context, target deploy.TargetConfig) error
 	stopFunc      func(ctx context.Context, target deploy.TargetConfig) error
 	uninstallFunc func(ctx context.Context, target deploy.TargetConfig) error
+	undeployFunc  func(ctx context.Context, target deploy.TargetConfig) error
 
 	lastTarget  deploy.TargetConfig
 	lastPayload deploy.Payload
@@ -89,7 +90,15 @@ func (m *mockDeployer) Uninstall(ctx context.Context, target deploy.TargetConfig
 	return nil
 }
 
-
+func (m *mockDeployer) Undeploy(ctx context.Context, target deploy.TargetConfig) error {
+	m.calls++
+	m.lastAction = "undeploy"
+	m.lastTarget = target
+	if m.undeployFunc != nil {
+		return m.undeployFunc(ctx, target)
+	}
+	return nil
+}
 func setupDeployTest(t *testing.T) (*Handlers, *storage.Memory, *mockDeployer, *models.Trap) {
 	t.Helper()
 	mem := storage.NewInMemory()
@@ -690,5 +699,66 @@ func TestDeployTrap_Lifecycle_UnsupportedAction(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "unsupported action") {
 		t.Errorf("expected error message to mention unsupported action, got: %s", w.Body.String())
+	}
+}
+
+func undeployRequest(t *testing.T, id string, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/traps/"+id+"/undeploy", strings.NewReader(body))
+	req.SetPathValue("id", id)
+	return req
+}
+
+func TestUndeployTrap_Success(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+	id := strconv.FormatInt(trap.ID, 10)
+
+	w := httptest.NewRecorder()
+	h.HandleUndeployTrap(w, undeployRequest(t, id, `{"host":"10.0.0.5","username":"admin","password":"pw","useSudo":true}`))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.calls != 1 || mock.lastTarget.Host != "10.0.0.5" || mock.lastTarget.Port != 22 || !mock.lastTarget.UseSudo {
+		t.Errorf("unexpected target passed to deployer: %+v (calls %d)", mock.lastTarget, mock.calls)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"removed"`) {
+		t.Errorf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestUndeployTrap_Errors(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+	id := strconv.FormatInt(trap.ID, 10)
+
+	cases := []struct {
+		name, id, body string
+		code           int
+		want           string
+	}{
+		{"unknown trap", "9999", `{"host":"h","username":"u","password":"p"}`, http.StatusNotFound, "trap not found"},
+		{"no host", id, `{"username":"u","password":"p"}`, http.StatusBadRequest, "host is required"},
+		{"no credentials", id, `{"host":"h","username":"u"}`, http.StatusBadRequest, "password or privateKey is required"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			h.HandleUndeployTrap(w, undeployRequest(t, c.id, c.body))
+			if w.Code != c.code || !strings.Contains(w.Body.String(), c.want) {
+				t.Errorf("got %d %s, want %d %q", w.Code, w.Body.String(), c.code, c.want)
+			}
+		})
+	}
+	if mock.calls != 0 {
+		t.Errorf("deployer must not be called on invalid input, got %d calls", mock.calls)
+	}
+
+	mock.undeployFunc = func(ctx context.Context, target deploy.TargetConfig) error {
+		return errors.New("failed to remove honeyforge-agent: Permission denied")
+	}
+	w := httptest.NewRecorder()
+	h.HandleUndeployTrap(w, undeployRequest(t, id, `{"host":"h","username":"u","password":"p"}`))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Permission denied") {
+		t.Errorf("got %d %s, want 500 with deployer error", w.Code, w.Body.String())
 	}
 }

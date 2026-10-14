@@ -132,6 +132,13 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 	webMux := http.NewServeMux()
 	if proxy != nil {
 		webMux.Handle("/api/", proxy)
+		// Деплой и снятие по SSH идут дольше WriteTimeout веб-сервера — продлеваем срок только для них.
+		slowSSH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(4 * time.Minute))
+			proxy.ServeHTTP(w, r)
+		})
+		webMux.Handle("POST /api/traps/{id}/deploy", slowSSH)
+		webMux.Handle("POST /api/traps/{id}/undeploy", slowSSH)
 		webMux.Handle("/cdn-cgi/rum", proxy)
 		webMux.Handle("/v1/rgstr", proxy)
 		webMux.Handle("/api/v2/metrics", proxy)

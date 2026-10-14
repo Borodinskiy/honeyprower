@@ -18,6 +18,18 @@ import (
 
 var _ Deployer = (*SSHDeployer)(nil)
 
+// removeCmd tolerates an absent service (already removed), but not a failed rm (no rights).
+const removeCmd = "systemctl disable --now honeyforge-agent.service >/dev/null 2>&1; " +
+	"rm -f /etc/systemd/system/honeyforge-agent.service /usr/local/bin/honeyforge-agent && " +
+	"rm -rf /etc/honeyforge && systemctl daemon-reload"
+
+// activateCmd resets SELinux labels first: files moved from /tmp keep user_tmp_t and systemd refuses to exec them (203/EXEC).
+const activateCmd = "if command -v restorecon >/dev/null 2>&1; then restorecon -F /usr/local/bin/honeyforge-agent /etc/honeyforge/config.json /etc/systemd/system/honeyforge-agent.service; fi; " +
+	"systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service"
+
+// verifyCmd waits for the agent to settle and prints its journal tail to stderr when it is not active.
+const verifyCmd = "sleep 3; systemctl is-active --quiet honeyforge-agent.service || { journalctl -u honeyforge-agent.service -n 15 --no-pager >&2; exit 1; }"
+
 // SSHDeployer implements Deployer over SSH.
 type SSHDeployer struct {
 	Timeout        time.Duration
@@ -59,25 +71,11 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 		return fmt.Errorf("binary file %q is empty", payload.BinaryPath)
 	}
 
-	// 2. Establish SSH connection with retry resilience
-	client, netConn, err := d.connect(ctx, target)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	defer netConn.Close()
-
-	// Terminate client connection early if context is cancelled
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-			_ = netConn.Close()
-		case <-done:
-		}
-	}()
+	defer closeConn()
 
 	// Pre-flight verification (if enabled)
 	if d.CheckPreflight || target.CheckPreflight {
@@ -127,9 +125,17 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	activationCmd := "systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service"
+	activationCmd := activateCmd
 	if err := d.runCommand(client, target, activationCmd); err != nil {
 		return fmt.Errorf("failed to activate honeyforge-agent service: %w", err)
+	}
+
+	// 5. Make sure the agent stays up: a crash on start is otherwise invisible.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := d.runCommand(client, target, verifyCmd); err != nil {
+		return fmt.Errorf("honeyforge-agent service is not running: %w", err)
 	}
 
 	// Post-install health check (if enabled)
@@ -147,23 +153,11 @@ func (d *SSHDeployer) Status(ctx context.Context, target TargetConfig) (*Service
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	client, netConn, err := d.connect(ctx, target)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
 		return nil, err
 	}
-	defer client.Close()
-	defer netConn.Close()
-
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-			_ = netConn.Close()
-		case <-done:
-		}
-	}()
+	defer closeConn()
 
 	status := &ServiceStatus{}
 
@@ -218,23 +212,11 @@ func (d *SSHDeployer) Restart(ctx context.Context, target TargetConfig) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	client, netConn, err := d.connect(ctx, target)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	defer netConn.Close()
-
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-			_ = netConn.Close()
-		case <-done:
-		}
-	}()
+	defer closeConn()
 
 	cmd := "systemctl restart honeyforge-agent.service"
 	if err := d.runCommand(client, target, cmd); err != nil {
@@ -249,23 +231,11 @@ func (d *SSHDeployer) Stop(ctx context.Context, target TargetConfig) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	client, netConn, err := d.connect(ctx, target)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	defer netConn.Close()
-
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-			_ = netConn.Close()
-		case <-done:
-		}
-	}()
+	defer closeConn()
 
 	cmd := "systemctl stop honeyforge-agent.service"
 	if err := d.runCommand(client, target, cmd); err != nil {
@@ -274,34 +244,26 @@ func (d *SSHDeployer) Stop(ctx context.Context, target TargetConfig) error {
 	return nil
 }
 
-// Uninstall cleanly stops, disables, and removes honeyforge-agent artifacts from the remote system.
-func (d *SSHDeployer) Uninstall(ctx context.Context, target TargetConfig) error {
+// Undeploy stops the agent service on the remote server and removes everything Deploy installed.
+func (d *SSHDeployer) Undeploy(ctx context.Context, target TargetConfig) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	client, netConn, err := d.connect(ctx, target)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	defer netConn.Close()
+	defer closeConn()
 
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-			_ = netConn.Close()
-		case <-done:
-		}
-	}()
-
-	cmd := "systemctl stop honeyforge-agent.service 2>/dev/null; systemctl disable honeyforge-agent.service 2>/dev/null; rm -f /etc/systemd/system/honeyforge-agent.service /usr/local/bin/honeyforge-agent; rm -rf /etc/honeyforge; systemctl daemon-reload 2>/dev/null"
-	if err := d.runCommand(client, target, cmd); err != nil {
-		return fmt.Errorf("failed to uninstall honeyforge-agent service: %w", err)
+	if err := d.runCommand(client, target, removeCmd); err != nil {
+		return fmt.Errorf("failed to remove honeyforge-agent: %w", err)
 	}
 	return nil
+}
+
+// Uninstall cleanly stops, disables, and removes honeyforge-agent artifacts from the remote system.
+func (d *SSHDeployer) Uninstall(ctx context.Context, target TargetConfig) error {
+	return d.Undeploy(ctx, target)
 }
 
 // PreflightCheck verifies write permissions and disk space on /tmp and /usr/local/bin.
@@ -309,12 +271,11 @@ func (d *SSHDeployer) PreflightCheck(ctx context.Context, target TargetConfig) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	client, netConn, err := d.connect(ctx, target)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	defer netConn.Close()
+	defer closeConn()
 
 	return d.runPreflight(ctx, client, target)
 }
@@ -324,12 +285,11 @@ func (d *SSHDeployer) HealthCheck(ctx context.Context, target TargetConfig) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	client, netConn, err := d.connect(ctx, target)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	defer netConn.Close()
+	defer closeConn()
 
 	return d.checkActiveState(ctx, client, target, 3*time.Second)
 }
@@ -381,11 +341,11 @@ func (d *SSHDeployer) checkActiveState(ctx context.Context, client *ssh.Client, 
 	return fmt.Errorf("service failed to reach active state within %v (last status: %s)", maxWait, lastStatus)
 }
 
-func (d *SSHDeployer) connect(ctx context.Context, target TargetConfig) (*ssh.Client, net.Conn, error) {
+// connect validates the target and opens an SSH client with retry resilience; closeConn releases it.
+func (d *SSHDeployer) connect(ctx context.Context, target TargetConfig) (*ssh.Client, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-
 	if target.Host == "" {
 		return nil, nil, errors.New("target host is required")
 	}
@@ -468,7 +428,21 @@ func (d *SSHDeployer) connect(ctx context.Context, target TargetConfig) (*ssh.Cl
 		}
 
 		client := ssh.NewClient(sshConn, chans, reqs)
-		return client, netConn, nil
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = client.Close()
+				_ = netConn.Close()
+			case <-done:
+			}
+		}()
+		closeConn := func() {
+			close(done)
+			_ = client.Close()
+			_ = netConn.Close()
+		}
+		return client, closeConn, nil
 	}
 
 	return nil, nil, lastErr

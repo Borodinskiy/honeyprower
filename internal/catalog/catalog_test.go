@@ -127,13 +127,14 @@ func TestValidateParamsKeepsUnknownKeys(t *testing.T) {
 
 func TestClasses(t *testing.T) {
 	cls := Classes()
-	if len(cls) != 12 {
-		t.Fatalf("expected 12 classes, got %d", len(cls))
+	if len(cls) != 13 {
+		t.Fatalf("expected 13 classes, got %d", len(cls))
 	}
 
 	expectedClasses := map[string]string{
 		"port_listener":    "Low",
 		"banner":           "Low",
+		"ssh":              "Medium",
 		"dialog":           "Medium",
 		"http":             "Medium",
 		"tarpit":           "Low",
