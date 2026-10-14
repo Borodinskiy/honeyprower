@@ -3,9 +3,14 @@
 
 pub mod banner;
 pub mod dialog;
-pub mod http;
+pub mod high_interaction;
 pub mod honeytoken;
+pub mod http;
+pub mod iec104;
+pub mod low_extra;
+pub mod medium_extra;
 pub mod port_listener;
+pub mod scada;
 pub mod tarpit;
 pub mod udp;
 
