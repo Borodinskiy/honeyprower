@@ -21,14 +21,21 @@ import (
 )
 
 type mockDeployer struct {
-	deployFunc  func(ctx context.Context, target deploy.TargetConfig, payload deploy.Payload) error
+	deployFunc    func(ctx context.Context, target deploy.TargetConfig, payload deploy.Payload) error
+	statusFunc    func(ctx context.Context, target deploy.TargetConfig) (*deploy.ServiceStatus, error)
+	restartFunc   func(ctx context.Context, target deploy.TargetConfig) error
+	stopFunc      func(ctx context.Context, target deploy.TargetConfig) error
+	uninstallFunc func(ctx context.Context, target deploy.TargetConfig) error
+
 	lastTarget  deploy.TargetConfig
 	lastPayload deploy.Payload
+	lastAction  string
 	calls       int
 }
 
 func (m *mockDeployer) Deploy(ctx context.Context, target deploy.TargetConfig, payload deploy.Payload) error {
 	m.calls++
+	m.lastAction = "deploy"
 	m.lastTarget = target
 	m.lastPayload = payload
 	if m.deployFunc != nil {
@@ -36,6 +43,52 @@ func (m *mockDeployer) Deploy(ctx context.Context, target deploy.TargetConfig, p
 	}
 	return nil
 }
+
+func (m *mockDeployer) Status(ctx context.Context, target deploy.TargetConfig) (*deploy.ServiceStatus, error) {
+	m.calls++
+	m.lastAction = "status"
+	m.lastTarget = target
+	if m.statusFunc != nil {
+		return m.statusFunc(ctx, target)
+	}
+	return &deploy.ServiceStatus{
+		Active:    true,
+		SubState:  "active",
+		Loaded:    true,
+		Listening: []int{2222},
+	}, nil
+}
+
+func (m *mockDeployer) Restart(ctx context.Context, target deploy.TargetConfig) error {
+	m.calls++
+	m.lastAction = "restart"
+	m.lastTarget = target
+	if m.restartFunc != nil {
+		return m.restartFunc(ctx, target)
+	}
+	return nil
+}
+
+func (m *mockDeployer) Stop(ctx context.Context, target deploy.TargetConfig) error {
+	m.calls++
+	m.lastAction = "stop"
+	m.lastTarget = target
+	if m.stopFunc != nil {
+		return m.stopFunc(ctx, target)
+	}
+	return nil
+}
+
+func (m *mockDeployer) Uninstall(ctx context.Context, target deploy.TargetConfig) error {
+	m.calls++
+	m.lastAction = "uninstall"
+	m.lastTarget = target
+	if m.uninstallFunc != nil {
+		return m.uninstallFunc(ctx, target)
+	}
+	return nil
+}
+
 
 func setupDeployTest(t *testing.T) (*Handlers, *storage.Memory, *mockDeployer, *models.Trap) {
 	t.Helper()
@@ -383,5 +436,259 @@ func TestDeployTrap_DefaultPortAndPrivateKey(t *testing.T) {
 	}
 	if !strings.Contains(mock.lastTarget.PrivateKey, "OPENSSH PRIVATE KEY") {
 		t.Errorf("expected private key to be set, got %q", mock.lastTarget.PrivateKey)
+	}
+}
+
+func TestDeployTrap_Lifecycle_Status(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+
+	mock.statusFunc = func(ctx context.Context, target deploy.TargetConfig) (*deploy.ServiceStatus, error) {
+		return &deploy.ServiceStatus{
+			Active:    true,
+			SubState:  "running",
+			Loaded:    true,
+			Listening: []int{2222, 8080},
+			Uptime:    "2 hours",
+			RawOutput: "systemctl is-active: running",
+		}, nil
+	}
+
+	// 1. Dispatch via query parameter ?action=status
+	body := []byte(`{"host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`)
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy?action=status", trap.ID), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+	w := httptest.NewRecorder()
+
+	h.HandleDeployTrap(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.calls != 1 || mock.lastAction != "status" {
+		t.Fatalf("expected 1 call with action 'status', got %d calls, lastAction=%s", mock.calls, mock.lastAction)
+	}
+
+	var resp struct {
+		Active         bool     `json:"active"`
+		SubState       string   `json:"subState"`
+		Loaded         bool     `json:"loaded"`
+		ListeningPorts []int    `json:"listeningPorts"`
+		Uptime         string   `json:"uptime"`
+		Status         string   `json:"status"`
+		TrapID         int64    `json:"trapId"`
+		Host           string   `json:"host"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Active || !resp.Loaded || resp.SubState != "running" {
+		t.Errorf("unexpected status response: %+v", resp)
+	}
+	if len(resp.ListeningPorts) != 2 || resp.ListeningPorts[0] != 2222 || resp.ListeningPorts[1] != 8080 {
+		t.Errorf("unexpected listening ports: %v", resp.ListeningPorts)
+	}
+	if resp.TrapID != trap.ID || resp.Host != "192.168.1.50" {
+		t.Errorf("unexpected trapId/host: %d, %s", resp.TrapID, resp.Host)
+	}
+
+	// 2. Dispatch via body field {"action": "status"}
+	bodyAction := []byte(`{"action":"status","host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`)
+	req2 := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy", trap.ID), bytes.NewReader(bodyAction))
+	req2.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+	w2 := httptest.NewRecorder()
+
+	h.HandleDeployTrap(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if mock.calls != 2 || mock.lastAction != "status" {
+		t.Fatalf("expected 2 calls with action 'status', got %d calls, lastAction=%s", mock.calls, mock.lastAction)
+	}
+}
+
+func TestDeployTrap_Lifecycle_Restart(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+
+	// Query parameter dispatch
+	body := []byte(`{"host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`)
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy?action=restart", trap.ID), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+	w := httptest.NewRecorder()
+
+	h.HandleDeployTrap(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.calls != 1 || mock.lastAction != "restart" {
+		t.Fatalf("expected 1 call with action 'restart', got %d, lastAction=%s", mock.calls, mock.lastAction)
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		TrapID int64  `json:"trapId"`
+		Host   string `json:"host"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp.Status != "restarted" || resp.TrapID != trap.ID || resp.Host != "192.168.1.50" {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+
+	// Body action dispatch
+	body2 := []byte(`{"action":"restart","host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`)
+	req2 := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy", trap.ID), bytes.NewReader(body2))
+	req2.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+	w2 := httptest.NewRecorder()
+
+	h.HandleDeployTrap(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if mock.calls != 2 || mock.lastAction != "restart" {
+		t.Fatalf("expected 2 calls with action 'restart', got %d", mock.calls)
+	}
+}
+
+func TestDeployTrap_Lifecycle_Stop(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+
+	body := []byte(`{"action":"stop","host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`)
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy", trap.ID), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+	w := httptest.NewRecorder()
+
+	h.HandleDeployTrap(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.calls != 1 || mock.lastAction != "stop" {
+		t.Fatalf("expected 1 call with action 'stop', got %d, lastAction=%s", mock.calls, mock.lastAction)
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp.Status != "stopped" {
+		t.Errorf("expected status 'stopped', got %q", resp.Status)
+	}
+}
+
+func TestDeployTrap_Lifecycle_Uninstall(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+
+	body := []byte(`{"action":"uninstall","host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`)
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy", trap.ID), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+	w := httptest.NewRecorder()
+
+	h.HandleDeployTrap(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.calls != 1 || mock.lastAction != "uninstall" {
+		t.Fatalf("expected 1 call with action 'uninstall', got %d, lastAction=%s", mock.calls, mock.lastAction)
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp.Status != "uninstalled" {
+		t.Errorf("expected status 'uninstalled', got %q", resp.Status)
+	}
+}
+
+func TestDeployTrap_Lifecycle_Errors(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+
+	actions := []struct {
+		action    string
+		setupMock func()
+		errSubstr string
+	}{
+		{
+			action: "status",
+			setupMock: func() {
+				mock.statusFunc = func(ctx context.Context, target deploy.TargetConfig) (*deploy.ServiceStatus, error) {
+					return nil, errors.New("ssh connection failed")
+				}
+			},
+			errSubstr: "ssh connection failed",
+		},
+		{
+			action: "restart",
+			setupMock: func() {
+				mock.restartFunc = func(ctx context.Context, target deploy.TargetConfig) error {
+					return errors.New("failed to restart service")
+				}
+			},
+			errSubstr: "failed to restart service",
+		},
+		{
+			action: "stop",
+			setupMock: func() {
+				mock.stopFunc = func(ctx context.Context, target deploy.TargetConfig) error {
+					return errors.New("failed to stop service")
+				}
+			},
+			errSubstr: "failed to stop service",
+		},
+		{
+			action: "uninstall",
+			setupMock: func() {
+				mock.uninstallFunc = func(ctx context.Context, target deploy.TargetConfig) error {
+					return errors.New("failed to uninstall service")
+				}
+			},
+			errSubstr: "failed to uninstall service",
+		},
+	}
+
+	for _, tc := range actions {
+		t.Run(tc.action, func(t *testing.T) {
+			tc.setupMock()
+			body := []byte(fmt.Sprintf(`{"action":%q,"host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`, tc.action))
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy", trap.ID), bytes.NewReader(body))
+			req.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+			w := httptest.NewRecorder()
+
+			h.HandleDeployTrap(w, req)
+
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("expected status 500 for action %q, got %d: %s", tc.action, w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.errSubstr) {
+				t.Errorf("expected response to contain %q, got: %s", tc.errSubstr, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestDeployTrap_Lifecycle_UnsupportedAction(t *testing.T) {
+	h, _, _, trap := setupDeployTest(t)
+
+	body := []byte(`{"action":"invalid_action","host":"192.168.1.50","username":"deployuser","password":"secretpassword"}`)
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/traps/%d/deploy", trap.ID), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(trap.ID, 10))
+	w := httptest.NewRecorder()
+
+	h.HandleDeployTrap(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for unsupported action, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unsupported action") {
+		t.Errorf("expected error message to mention unsupported action, got: %s", w.Body.String())
 	}
 }
