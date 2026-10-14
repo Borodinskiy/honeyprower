@@ -829,3 +829,35 @@ body.dark-theme .event-item.event-warn { border-left-color: #f59e0b; }
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
 }
+
+/* --- Хосты --- */
+.page-help { margin: -8px 0 16px; font-size: 13px; }
+.back-link {
+    display: inline-block;
+    margin-bottom: 12px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 14px;
+}
+.back-link:hover { color: var(--color-accent); }
+.host-heading { min-width: 0; }
+.host-heading h1 { margin-bottom: 4px; overflow-wrap: anywhere; }
+.host-meta { color: var(--text-muted); font-size: 14px; overflow-wrap: anywhere; }
+.host-meta .host-state { font-weight: 600; }
+.traps-subheader { margin-top: 28px; }
+.traps-subheader h2 { font-size: 18px; margin: 0; }
+.host-op-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+.host-item.pending { border-left-color: #f59e0b; }
+.host-item.loose { border-left-style: dashed; }
+.host-item .trap-info code { font-size: 12px; }
+.empty-hint {
+    color: var(--text-muted);
+    padding: 24px;
+    border: 1px dashed var(--border-color);
+    border-radius: 6px;
+    text-align: center;
+}

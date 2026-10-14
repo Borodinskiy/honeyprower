@@ -19,8 +19,8 @@ const CONFIG = {
     LEGACY_TOKEN_KEY: 'auth_token', // старые версии хранили токен здесь — подчищаем
     LANG_KEY: 'app_lang',
     THEME_KEY: 'app_theme',
-    DEPLOY_TARGET_KEY: 'deploy_target_', // + id ловушки: куда её развернули (без паролей), чтобы потом снять
     REQUEST_TIMEOUT: 10000,
+    SSH_TIMEOUT: 240000, // деплой, снятие и статус хоста идут по SSH и бывают долгими
     POLL_INTERVAL: 10000 // автообновление дашборда, мс
 };
 
@@ -28,6 +28,7 @@ const CONFIG = {
 
 const MOCK_DATA = {
     user: { id: 1, username: 'admin' },
+    hosts: [],
     traps: [
         { id: 1, name: 'SSH Honeypot', type: 'SSH', target: '192.168.1.10:22', warnings: 142, active: true,  totalEvents: 1420, lastEventAt: '2 мин назад' },
         { id: 2, name: 'Web Trap',     type: 'Web', target: 'http://10.0.0.5/',  warnings: 87,  active: true,  totalEvents: 870,  lastEventAt: '15 мин назад' },
@@ -162,25 +163,70 @@ const api = {
         return this._request(`/traps/${id}`, { method: 'DELETE' });
     },
 
-    async deployTrap(id, target) {
-        if (CONFIG.USE_MOCK_DATA) {
-            await new Promise(r => setTimeout(r, 1200));
-            const trap = MOCK_DATA.traps.find(t => t.id === Number(id));
-            if (trap) {
-                trap.active = true;
-                trap.status = 'online';
-            }
-            return { status: 'deployed', trapId: Number(id), host: target.host };
-        }
-        return this._request(`/traps/${id}/deploy`, { method: 'POST', body: target, timeout: 240000 });
+    //  ХОСТЫ
+
+    async getHosts() {
+        if (CONFIG.USE_MOCK_DATA) return MOCK_DATA.hosts.map(h => ({ ...h }));
+        return this._request('/hosts');
     },
 
-    async undeployTrap(id, target) {
+    async createHost(host) {
+        if (CONFIG.USE_MOCK_DATA) {
+            const created = {
+                id: Date.now(), name: host.name, address: host.address, sshPort: host.sshPort,
+                username: host.username, authType: host.authType, useSudo: host.useSudo,
+                hasPassword: !!host.password, hasPrivateKey: !!host.privateKey, hasSudoPassword: !!host.sudoPassword,
+                trapCount: 0, enabledTraps: 0, onlineTraps: 0, pendingChanges: false
+            };
+            MOCK_DATA.hosts.push(created);
+            return { ...created };
+        }
+        return this._request('/hosts', { method: 'POST', body: host });
+    },
+
+    async updateHost(id, patch) {
+        if (CONFIG.USE_MOCK_DATA) {
+            const host = MOCK_DATA.hosts.find(h => h.id === Number(id));
+            if (host) Object.assign(host, patch);
+            return host ? { ...host } : null;
+        }
+        return this._request(`/hosts/${id}`, { method: 'PATCH', body: patch });
+    },
+
+    async deleteHost(id, { force = false } = {}) {
+        if (CONFIG.USE_MOCK_DATA) {
+            MOCK_DATA.hosts = MOCK_DATA.hosts.filter(h => h.id !== Number(id));
+            MOCK_DATA.traps.forEach(trap => { if (trap.hostId === Number(id)) trap.hostId = null; });
+            return null;
+        }
+        return this._request(`/hosts/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' });
+    },
+
+    async deployHost(id) {
+        if (CONFIG.USE_MOCK_DATA) {
+            await new Promise(r => setTimeout(r, 1200));
+            const host = MOCK_DATA.hosts.find(h => h.id === Number(id));
+            if (host) { host.deployedAt = new Date().toISOString(); host.pendingChanges = false; }
+            return { status: 'deployed', hostId: Number(id), host: host && host.address, traps: host ? host.enabledTraps : 0 };
+        }
+        return this._request(`/hosts/${id}/deploy`, { method: 'POST', timeout: CONFIG.SSH_TIMEOUT });
+    },
+
+    async undeployHost(id) {
         if (CONFIG.USE_MOCK_DATA) {
             await new Promise(r => setTimeout(r, 800));
-            return { status: 'removed', trapId: Number(id), host: target.host };
+            const host = MOCK_DATA.hosts.find(h => h.id === Number(id));
+            if (host) { delete host.deployedAt; host.pendingChanges = false; }
+            return { status: 'removed', hostId: Number(id), host: host && host.address };
         }
-        return this._request(`/traps/${id}/undeploy`, { method: 'POST', body: target, timeout: 240000 });
+        return this._request(`/hosts/${id}/undeploy`, { method: 'POST', timeout: CONFIG.SSH_TIMEOUT });
+    },
+
+    async getHostStatus(id) {
+        if (CONFIG.USE_MOCK_DATA) {
+            return { active: true, subState: 'active', expectedPorts: [], missingPorts: [] };
+        }
+        return this._request(`/hosts/${id}/status`, { timeout: CONFIG.SSH_TIMEOUT });
     },
 
     async getTrapEvents(id, type = '') {
@@ -261,14 +307,19 @@ const state = {
     presets: [],
     stats: null,
     user: null,
-    searchQuery: '',
     loading: false,
     selectedTrapId: null,
     editingTrapId: null,
+    hosts: [],
+    hostSearch: '',
+    currentHostId: null,   // null — список хостов; число — открытый хост; 'none' — ловушки без хоста
+    editingHostId: null,
+    hostOps: {},           // id хоста → выполняемая операция ('deploy' | 'undeploy' | 'status')
+    hostOpResult: null,    // { hostId, kind: 'loading'|'success'|'error', text } — строка состояния под шапкой хоста
     eventTypeFilter: ''
 };
 
-const TAB_LABELS = { traps: 'Ловушки', stats: 'Статистика', events: 'События' };
+const TAB_LABELS = { traps: 'Хосты', stats: 'Статистика', events: 'События' };
 
 // Типы событий (русские подписи). Набор закрыт на стороне агента/центра.
 const EVENT_TYPE_LABELS = {
@@ -387,36 +438,97 @@ const I18N_DICT = {
     "Заполните название, тип и адрес.": "Fill in name, type and target.",
     "Слишком длинное значение поля.": "Field value is too long.",
 
-    "Развернуть по SSH": "Deploy via SSH",
-    "Развертывание ловушки": "Deploy trap",
-    "Развертывание ловушки по SSH": "Deploy Trap via SSH",
-    "Автоматическая установка агента, настройка службы systemd и запуск ловушки на удаленном Linux-сервере.": "Automatic agent installation, systemd service configuration, and honeypot start on remote Linux server.",
-    "Хост / IP-адрес сервера": "Host / Server IP address",
+    "Хосты": "Hosts",
+    "+ Добавить хост": "+ Add Host",
+    "Хост — сервер, на котором один агент держит все свои ловушки. Откройте хост, чтобы добавить ловушки и развернуть агента.": "A host is a server where one agent runs all of its traps. Open a host to add traps and deploy the agent.",
+    "Поиск хостов по названию или адресу...": "Search hosts by name or address...",
+    "← Все хосты": "← All hosts",
+    "Развернуть": "Deploy",
+    "Применить изменения": "Apply changes",
+    "Переразвернуть": "Redeploy",
+    "Проверить статус": "Check status",
+    "Снять с сервера": "Remove from server",
+    "Скачать config.json": "Download config.json",
+    "Изменить хост": "Edit host",
+    "Удалить хост": "Delete host",
+    "Ловушки хоста": "Host traps",
+    "Ловушки без хоста": "Traps without a host",
+    "Без хоста": "No host",
+    "— Без хоста —": "— No host —",
+    "Хост": "Host",
+    "Агент хоста запускает все его включённые ловушки, поэтому их порты не должны совпадать.": "The host agent runs all enabled traps of the host, so their ports must not overlap.",
+    "Хостов пока нет. Добавьте сервер, на котором будут работать ловушки.": "No hosts yet. Add a server to run traps on.",
+    "Хосты не найдены.": "No hosts found.",
+    "На этом хосте пока нет ловушек.": "This host has no traps yet.",
+    "Эти ловушки не привязаны к хосту: центр не может развернуть их сам. Привяжите их к хосту через «Редактировать».": "These traps are not assigned to a host, so the center cannot deploy them. Assign them to a host via “Edit”.",
+    "Ловушек": "Traps",
+    "включено": "enabled",
+    "● Не развёрнут": "● Not deployed",
+    "● Развёрнут": "● Deployed",
+    "● Есть неприменённые изменения": "● Changes not applied",
+    "на связи": "online",
+    "из": "of",
+    "развёрнут": "deployed",
+    "Новый хост": "New Host",
+    "Изменение хоста": "Edit Host",
+    "Доступ по SSH центр хранит зашифрованным и в браузер не возвращает. По нему он ставит, обновляет и снимает агента хоста.": "The center stores SSH access encrypted and never sends it back to the browser. It uses it to install, update and remove the host agent.",
+    "Название": "Name",
+    "Например: web-01 (DMZ)": "E.g.: web-01 (DMZ)",
+    "Адрес сервера": "Server address",
+    "Например: 192.168.1.50 или honeypot.internal": "E.g.: 192.168.1.50 or honeypot.internal",
     "SSH Порт": "SSH Port",
     "Имя пользователя SSH": "SSH Username",
     "Способ аутентификации": "Authentication Method",
     "Пароль SSH": "SSH Password",
     "Приватный SSH-ключ": "Private SSH Key",
-    "Приватный ключ SSH (OpenSSH / PEM)": "Private SSH key (OpenSSH / PEM)",
+    "Приватный ключ SSH (OpenSSH / PEM, без пароля)": "Private SSH key (OpenSSH / PEM, unencrypted)",
+    "Введите пароль пользователя SSH": "Enter the SSH user's password",
     "Использовать sudo (если подключаетесь не под root)": "Use sudo (if not connecting as root)",
-    "Пароль root / sudo (если отличается от пароля SSH)": "Root / sudo password (if different from SSH password)",
-    "Развернуть ловушку": "Deploy Trap",
-    "Подключение к серверу и установка агента...": "Connecting to server and deploying agent...",
-    "Ловушка успешно развернута на": "Trap successfully deployed on",
-    "Служба honeyforge-agent запущена.": "honeyforge-agent service is running.",
+    "Пароль sudo (если отличается от пароля SSH)": "Sudo password (if different from SSH password)",
+    "Оставьте пустым, если совпадает с паролем SSH": "Leave empty if it matches the SSH password",
+    "Сохранён — оставьте пустым, чтобы не менять": "Saved — leave empty to keep it",
+    "Отмена": "Cancel",
+    "Развёртывание агента: загрузка, настройка systemd, запуск...": "Deploying the agent: upload, systemd setup, start...",
+    "Остановка агента и удаление его файлов с сервера...": "Stopping the agent and removing its files from the server...",
+    "Подключение к серверу и проверка агента...": "Connecting to the server and checking the agent...",
+    "Агент развёрнут. Ловушек запущено: {n}.": "Agent deployed. Traps running: {n}.",
+    "Агент снят с сервера: служба остановлена, файлы удалены.": "Agent removed: service stopped, files deleted.",
+    "Агент работает (служба {state}).": "Agent is running (service {state}).",
+    "Агент не работает (служба {state}).": "Agent is not running (service {state}).",
+    "Не слушаются порты: {ports}.": "Ports not listening: {ports}.",
+    "Все порты ловушек открыты.": "All trap ports are open.",
     "Ошибка развертывания": "Deployment error",
-    "Снять с сервера": "Remove from server",
-    "Снятие ловушки": "Remove trap",
-    "Остановка службы honeyforge-agent и удаление агента, его конфига и unit-файла с сервера.": "Stops the honeyforge-agent service and removes the agent, its config and unit file from the server.",
-    "Остановить и удалить": "Stop and remove",
-    "Подключение к серверу и остановка агента...": "Connecting to server and stopping agent...",
-    "Ловушка снята с сервера": "Trap removed from server",
-    "Служба остановлена, файлы агента удалены.": "Service stopped, agent files removed.",
-    "Ошибка снятия ловушки": "Trap removal error",
-    "Укажите хост сервера": "Specify server host",
-    "Укажите имя пользователя SSH": "Specify SSH username",
-    "Введите пароль SSH": "Enter SSH password",
-    "Вставьте приватный SSH-ключ": "Paste private SSH key",
+    "Ошибка снятия агента": "Agent removal error",
+    "Ошибка проверки статуса": "Status check error",
+    "Снять агента с хоста «{name}»? Все ловушки этого хоста перестанут работать.": "Remove the agent from host \"{name}\"? All traps of this host will stop.",
+    "Удалить хост «{name}»? Его ловушки останутся в разделе «Без хоста».": "Delete host \"{name}\"? Its traps will move to \"No host\".",
+    "На сервере всё ещё работает агент этого хоста. Удалить хост, не снимая агента? Управлять им из центра будет нельзя.": "The host agent is still running on the server. Delete the host without removing it? The center will no longer be able to manage it.",
+    "Не удалось сохранить хост.": "Failed to save host.",
+    "Не удалось удалить хост.": "Failed to delete host.",
+    "Укажите название.": "Enter a name.",
+    "Укажите адрес хоста.": "Enter the host address.",
+    "Некорректный адрес: нужен IP или DNS-имя без схемы и порта.": "Invalid address: use an IP or DNS name without scheme or port.",
+    "SSH-порт должен быть от 1 до 65535.": "SSH port must be 1..65535.",
+    "Некорректное имя пользователя SSH.": "Invalid SSH username.",
+    "Введите пароль SSH.": "Enter the SSH password.",
+    "Вставьте приватный SSH-ключ.": "Paste a private SSH key.",
+    "Не удалось разобрать приватный ключ.": "Could not parse the private key.",
+    "Ключ защищён паролем — такие ключи не поддерживаются. Снимите пароль: ssh-keygen -p -f <файл ключа>.": "The key is passphrase-protected, which is not supported. Remove the passphrase: ssh-keygen -p -f <key file>.",
+    "Слишком длинный пароль или ключ.": "Password or key is too long.",
+    "Хост с таким адресом и SSH-портом уже есть.": "A host with this address and SSH port already exists.",
+    "Хост не найден.": "Host not found.",
+    "На хосте нет включённых ловушек — разворачивать нечего.": "The host has no enabled traps — nothing to deploy.",
+    "С этим хостом уже выполняется операция. Дождитесь её окончания.": "Another operation on this host is in progress. Wait for it to finish.",
+    "Сохранённый SSH-доступ не расшифровывается (сменился ключ центра). Введите пароль или ключ заново в «Изменить хост».": "Saved SSH access cannot be decrypted (the center key changed). Re-enter the password or key in “Edit host”.",
+    "У хоста нет сохранённого SSH-доступа.": "The host has no saved SSH access.",
+    "Агент на сервере ещё работает — сначала снимите его.": "The agent is still running on the server — remove it first.",
+    "Ловушка привязана к хосту — разворачивайте хост целиком.": "The trap belongs to a host — deploy the whole host.",
+    "Порт {port} на этом хосте уже занят ловушкой «{trap}».": "Port {port} on this host is already used by trap \"{trap}\".",
+    "Ловушка создана": "Trap created",
+    "Ловушка добавлена на хост «{host}». Она заработает после того, как вы примените изменения на сервере.": "The trap was added to host \"{host}\". It will start once you apply the changes on the server.",
+    "Применить на сервере": "Apply on server",
+    "Позже": "Later",
+    "Ловушка не привязана к хосту. Запустите агента вручную или привяжите ловушку к хосту, чтобы центр сам разворачивал её по SSH.": "The trap is not assigned to a host. Run the agent manually or assign the trap to a host so the center deploys it over SSH.",
     "Готово": "Done",
     "Закрыть": "Close"
 };
@@ -435,9 +547,27 @@ const SERVER_ERROR_LABELS = {
     'name is too long': 'Слишком длинное значение поля.',
     'type is too long': 'Слишком длинное значение поля.',
     'target is too long': 'Слишком длинное значение поля.',
-    'host is required': 'Укажите хост сервера.',
+    'host is required': 'Укажите адрес хоста.',
     'username is required': 'Укажите имя пользователя SSH.',
-    'password or privateKey is required': 'Требуется пароль или приватный SSH-ключ.',
+    'password or privateKey is required': 'Введите пароль SSH.',
+    'name is required': 'Укажите название.',
+    'address is required': 'Укажите адрес хоста.',
+    'invalid address': 'Некорректный адрес: нужен IP или DNS-имя без схемы и порта.',
+    'ssh port must be 1..65535': 'SSH-порт должен быть от 1 до 65535.',
+    'invalid username': 'Некорректное имя пользователя SSH.',
+    'password is required': 'Введите пароль SSH.',
+    'private key is required': 'Вставьте приватный SSH-ключ.',
+    'invalid private key': 'Не удалось разобрать приватный ключ.',
+    'encrypted private keys are not supported': 'Ключ защищён паролем — такие ключи не поддерживаются. Снимите пароль: ssh-keygen -p -f <файл ключа>.',
+    'secret is too long': 'Слишком длинный пароль или ключ.',
+    'host with this address already exists': 'Хост с таким адресом и SSH-портом уже есть.',
+    'host not found': 'Хост не найден.',
+    'host has no enabled traps': 'На хосте нет включённых ловушек — разворачивать нечего.',
+    'another operation on this host is in progress': 'С этим хостом уже выполняется операция. Дождитесь её окончания.',
+    'stored credentials cannot be decrypted; re-enter them': 'Сохранённый SSH-доступ не расшифровывается (сменился ключ центра). Введите пароль или ключ заново в «Изменить хост».',
+    'host has no saved credentials': 'У хоста нет сохранённого SSH-доступа.',
+    'host is deployed; remove the agent first': 'Агент на сервере ещё работает — сначала снимите его.',
+    'trap belongs to a host; deploy the host instead': 'Ловушка привязана к хосту — разворачивайте хост целиком.',
     'trap not found': 'Ловушка не найдена.',
     'deployer not configured': 'Служба деплоя недоступна на сервере.',
     'deployer service unavailable': 'Служба деплоя недоступна на сервере.',
@@ -446,6 +576,16 @@ const SERVER_ERROR_LABELS = {
     'agent binary not found; please build the agent first': 'Бинарный файл агента не найден на сервере.',
     'center url is loopback; set PUBLIC_URL': 'Центр открыт по localhost — агент на удалённом сервере не сможет до него достучаться. Задайте PUBLIC_URL (внешний адрес центра) и перезапустите центр.'
 };
+
+// Части составных ошибок деплоя (internal/deploy): между ними — вывод самого агента,
+// поэтому переводим фразы, а не сообщение целиком.
+const SERVER_ERROR_PHRASES = [
+    ['agent failed to start:', 'Агент не запустился:'],
+    ['previous version restored', 'На сервере восстановлена предыдущая рабочая версия — ловушки хоста продолжают работать.'],
+    ['agent stopped: no previous working version to restore', 'Агент остановлен: предыдущей рабочей версии нет.'],
+    ['agent stopped: previous version did not start either', 'Агент остановлен: предыдущая версия тоже не запустилась.'],
+    ['rollback failed:', 'Откат не удался:']
+];
 
 const I18N_REVERSE = Object.fromEntries(
     Object.entries(I18N_DICT).map(([ru, en]) => [en, ru])
@@ -517,9 +657,16 @@ function escapeHtml(str) {
 // по идее должно извлекать данные из сообщений бэка, НО, возможно, будет требовать доработки (без бэка не проверить)
 function getErrorMessage(err, fallbackRuKey) {
     const d = err?.data;
+    if (d?.error === 'port conflict') {
+        return t('Порт {port} на этом хосте уже занят ловушкой «{trap}».')
+            .replace('{port}', d.port || '?').replace('{trap}', d.trap || '?');
+    }
     const fromError = (typeof d?.error === 'object' && d.error !== null) ? d.error.message : d?.error;
     const serverMsg = fromError || d?.message;
     if (serverMsg && SERVER_ERROR_LABELS[serverMsg]) return t(SERVER_ERROR_LABELS[serverMsg]);
+    if (serverMsg && state.currentLang === 'ru') {
+        return SERVER_ERROR_PHRASES.reduce((msg, [en, ru]) => msg.split(en).join(ru), serverMsg);
+    }
     return serverMsg || t(fallbackRuKey);
 }
 
@@ -554,12 +701,10 @@ function updateTrapActions() {
 
     const eventsBtn = document.getElementById('open-events-trap-btn');
     const editBtn = document.getElementById('open-edit-trap-btn');
-    const deployBtn = document.getElementById('open-deploy-trap-btn');
-    const undeployBtn = document.getElementById('open-undeploy-trap-btn');
     const deleteBtn = document.getElementById('delete-trap-btn');
 
     // Кнопки действий показываем только при выбранной ловушке — без выбора они лишь мешают.
-    for (const btn of [eventsBtn, editBtn, deployBtn, undeployBtn, deleteBtn]) {
+    for (const btn of [eventsBtn, editBtn, deleteBtn]) {
         if (!btn) continue;
         btn.disabled = !hasSelection;
         btn.hidden = !hasSelection;
@@ -629,7 +774,18 @@ function buildTrapCard(trap) {
     `;
 }
 
-// Это вывод всех ловушек в #traps-list-container
+// Ловушки открытого хоста ('none' — ловушки без хоста).
+function trapsOfCurrentHost() {
+    const id = state.currentHostId;
+    if (id === null) return [];
+    return state.traps.filter(trap => id === 'none' ? trap.hostId == null : trap.hostId === id);
+}
+
+function hostById(id) {
+    return state.hosts.find(h => h.id === id) || null;
+}
+
+// Это вывод ловушек открытого хоста в #traps-list-container
 function renderTraps() {
     const container = document.getElementById('traps-list-container');
     if (!container) return;
@@ -639,18 +795,136 @@ function renderTraps() {
         return;
     }
 
-    const query = state.searchQuery.toLowerCase().trim();
-    const filtered = state.traps.filter(trap => {
-        if (!query) return true;
-        return (trap.name || '').toLowerCase().includes(query)
-            || (trap.class || '').toLowerCase().includes(query)
-            || classTitle(trap.class).toLowerCase().includes(query)
-            || trapAddress(trap).toLowerCase().includes(query);
-    });
+    const traps = trapsOfCurrentHost();
+    if (!traps.length) {
+        container.innerHTML = `<p class="empty-hint">${t('На этом хосте пока нет ловушек.')}</p>`;
+        return;
+    }
+    container.innerHTML = traps.map(buildTrapCard).join('');
+}
 
-    container.innerHTML = filtered.length
-        ? filtered.map(buildTrapCard).join('')
-        : `<p style="color: var(--text-muted);">${t('Ловушки не найдены.')}</p>`;
+// Состояние хоста: не развёрнут / развёрнут / есть неприменённые изменения.
+function hostState(host) {
+    if (!host.deployedAt) return { key: 'idle', label: t('● Не развёрнут'), color: '#6b7280' };
+    if (host.pendingChanges) return { key: 'pending', label: t('● Есть неприменённые изменения'), color: '#f59e0b' };
+    const allOnline = host.enabledTraps > 0 && host.onlineTraps >= host.enabledTraps;
+    return { key: 'deployed', label: t('● Развёрнут'), color: allOnline ? '#10b981' : '#f59e0b' };
+}
+
+function hostAddress(host) {
+    const port = host.sshPort && host.sshPort !== 22 ? `:${host.sshPort}` : '';
+    return `${host.username}@${host.address}${port}`;
+}
+
+function buildHostCard(host) {
+    const st = hostState(host);
+    const cls = st.key === 'idle' ? 'inactive' : (st.key === 'pending' ? 'pending' : '');
+    const online = host.deployedAt
+        ? ` · ${t('на связи')} ${escapeHtml(host.onlineTraps)} ${t('из')} ${escapeHtml(host.enabledTraps)}`
+        : '';
+    return `
+        <div class="trap-item host-item ${cls}" data-host-id="${host.id}">
+            <div class="trap-title">
+                <span class="trap-name" title="${escapeHtml(host.name)}">${escapeHtml(host.name)}</span>
+                <span class="trap-status" style="color: ${st.color};">${escapeHtml(st.label)}</span>
+            </div>
+            <div class="trap-info">${escapeHtml(hostAddress(host))}</div>
+            <div class="trap-info"><span>${t('Ловушек')}</span>: ${escapeHtml(host.trapCount ?? 0)} (${t('включено')} ${escapeHtml(host.enabledTraps ?? 0)})${online}</div>
+        </div>
+    `;
+}
+
+// Список хостов + карточка «Без хоста», если такие ловушки есть.
+function renderHosts() {
+    const container = document.getElementById('hosts-list-container');
+    if (!container) return;
+
+    if (state.loading) {
+        container.innerHTML = `<p style="color: var(--text-muted);">${t('Загрузка...')}</p>`;
+        return;
+    }
+
+    const query = state.hostSearch.toLowerCase().trim();
+    const hosts = state.hosts.filter(h => !query
+        || (h.name || '').toLowerCase().includes(query)
+        || hostAddress(h).toLowerCase().includes(query));
+
+    const loose = state.traps.filter(trap => trap.hostId == null);
+    const looseCard = loose.length && !query ? `
+        <div class="trap-item host-item inactive loose" data-host-id="none">
+            <div class="trap-title"><span class="trap-name">${t('Без хоста')}</span></div>
+            <div class="trap-info"><span>${t('Ловушек')}</span>: ${loose.length}</div>
+        </div>` : '';
+
+    if (!hosts.length && !looseCard) {
+        container.innerHTML = `<p class="empty-hint">${t(state.hosts.length ? 'Хосты не найдены.' : 'Хостов пока нет. Добавьте сервер, на котором будут работать ловушки.')}</p>`;
+        return;
+    }
+    container.innerHTML = hosts.map(buildHostCard).join('') + looseCard;
+}
+
+// Шапка открытого хоста: название, адрес, состояние, доступность кнопок.
+function renderHostView() {
+    const listView = document.getElementById('hosts-view');
+    const hostView = document.getElementById('host-view');
+    if (!listView || !hostView) return;
+
+    const open = state.currentHostId !== null;
+    listView.hidden = open;
+    hostView.hidden = !open;
+    if (!open) return;
+
+    const loose = state.currentHostId === 'none';
+    const host = loose ? null : hostById(state.currentHostId);
+    const titleEl = document.getElementById('host-view-title');
+    const metaEl = document.getElementById('host-view-meta');
+    const trapsTitle = document.getElementById('host-traps-title');
+    const actions = document.getElementById('host-actions');
+
+    if (loose) {
+        titleEl.textContent = t('Ловушки без хоста');
+        metaEl.textContent = t('Эти ловушки не привязаны к хосту: центр не может развернуть их сам. Привяжите их к хосту через «Редактировать».');
+        trapsTitle.textContent = t('Ловушки без хоста');
+        actions.hidden = true;
+    } else if (host) {
+        const st = hostState(host);
+        titleEl.textContent = host.name;
+        const deployed = host.deployedAt
+            ? ` · ${t('развёрнут')} ${escapeHtml(new Date(host.deployedAt).toLocaleString(state.currentLang === 'en' ? 'en-GB' : 'ru-RU'))}`
+            : '';
+        metaEl.innerHTML = `${escapeHtml(hostAddress(host))}${host.useSudo ? ' (sudo)' : ''} · `
+            + `<span class="host-state" style="color: ${st.color};">${escapeHtml(st.label)}</span>${deployed}`;
+        trapsTitle.textContent = t('Ловушки хоста');
+        actions.hidden = false;
+
+        const busy = !!state.hostOps[host.id];
+        const deployBtn = document.getElementById('host-deploy-btn');
+        deployBtn.textContent = t(!host.deployedAt ? 'Развернуть' : (host.pendingChanges ? 'Применить изменения' : 'Переразвернуть'));
+        deployBtn.disabled = busy || host.enabledTraps === 0;
+        deployBtn.title = host.enabledTraps === 0 ? t('На хосте нет включённых ловушек — разворачивать нечего.') : '';
+        document.getElementById('host-status-btn').disabled = busy;
+        document.getElementById('host-undeploy-btn').disabled = busy || !host.deployedAt;
+        document.getElementById('host-config-btn').disabled = host.enabledTraps === 0;
+        document.getElementById('host-edit-btn').disabled = busy;
+        document.getElementById('host-delete-btn').disabled = busy;
+    }
+
+    renderHostOpStatus();
+}
+
+// Строка результата операции над хостом (деплой, снятие, статус).
+function renderHostOpStatus() {
+    const box = document.getElementById('host-op-status');
+    if (!box) return;
+    const r = state.hostOpResult;
+    if (!r || r.hostId !== state.currentHostId) {
+        box.hidden = true;
+        return;
+    }
+    box.hidden = false;
+    box.className = `deploy-status-box deploy-status-${r.kind}`;
+    document.getElementById('host-op-spinner').style.display = r.kind === 'loading' ? 'block' : 'none';
+    document.getElementById('host-op-text').textContent = r.text;
 }
 
 // Рисует три KPI-карточки на вкладке "Статистика": активные ловушки, предупреждения за 24ч, активные задачи.
@@ -703,6 +977,7 @@ function renderTrapDetails() {
     container.innerHTML = active.map(trap => `
         <div class="trap-item" data-trap-id="${trap.id}">
             <div class="trap-title">${escapeHtml(trap.name)}</div>
+            <div class="trap-info"><span>${t('Хост')}</span>: ${escapeHtml(trapHostName(trap))}</div>
             <div class="trap-info"><span>${t('Всего событий')}</span>: ${escapeHtml(trap.totalEvents ?? 0)}</div>
             <div class="trap-info"><span>${t('Последнее')}</span>: ${escapeHtml(trap.lastEventAt ?? '—')}</div>
         </div>
@@ -717,10 +992,14 @@ function renderEventsSelect() {
 
     const prevValue = select.value;
 
+    // Ловушки сгруппированы по хостам, как на вкладке «Хосты».
+    const option = trap => `<option value="${trap.id}">${escapeHtml(trap.name)}</option>`;
+    const groups = state.hosts
+        .map(h => ({ label: h.name, traps: state.traps.filter(trap => trap.hostId === h.id) }))
+        .concat([{ label: t('Без хоста'), traps: state.traps.filter(trap => trap.hostId == null) }])
+        .filter(g => g.traps.length);
     const optionsHtml = `<option value="">${t('— Выберите ловушку —')}</option>`
-        + state.traps.map(trap =>
-            `<option value="${trap.id}">${escapeHtml(trap.name)}</option>`
-        ).join('');
+        + groups.map(g => `<optgroup label="${escapeHtml(g.label)}">${g.traps.map(option).join('')}</optgroup>`).join('');
     // не пересобираем список без изменений: иначе автообновление закрывает открытый select
     if (select.dataset.optionsHtml !== optionsHtml) {
         select.innerHTML = optionsHtml;
@@ -738,8 +1017,15 @@ function renderEventsSelect() {
 }
 
 //вызов всех рэндеров
+function trapHostName(trap) {
+    const host = trap.hostId != null ? hostById(trap.hostId) : null;
+    return host ? host.name : t('Без хоста');
+}
+
 function renderAll() {
     updateBreadcrumb();
+    renderHosts();
+    renderHostView();
     renderTraps();
     renderStats();
     renderTrapDetails();
@@ -758,7 +1044,13 @@ function renderAll() {
 //проверка существует ли выбранная ловушка
 async function loadTraps() {
     try {
-        state.traps = await api.getTraps() || [];
+        const [traps, hosts] = await Promise.all([api.getTraps(), api.getHosts()]);
+        state.traps = traps || [];
+        state.hosts = hosts || [];
+        // Открытый хост удалили (например, в другой вкладке) — возвращаемся к списку.
+        if (typeof state.currentHostId === 'number' && !hostById(state.currentHostId)) {
+            setCurrentHost(null);
+        }
         if (state.selectedTrapId !== null
             && !state.traps.some(t => t.id === state.selectedTrapId)) {
             state.selectedTrapId = null;
@@ -793,6 +1085,7 @@ async function loadCatalog() {
 // полностью обновляет все данные с бэка и перерисовывает их в UI
 async function refreshAll() {
     state.loading = true;
+    renderHosts();
     renderTraps();
     renderStats();
 
@@ -1212,6 +1505,20 @@ function applyPreset(presetId) {
     resetParamsView();
 }
 
+// Заполняет выбор хоста в форме ловушки.
+function populateHostSelect(selected) {
+    const sel = document.getElementById('trap-host');
+    if (!sel) return;
+    sel.innerHTML = `<option value="">${t('— Без хоста —')}</option>`
+        + state.hosts.map(h => `<option value="${h.id}">${escapeHtml(h.name)} (${escapeHtml(h.address)})</option>`).join('');
+    sel.value = selected != null && hostById(selected) ? String(selected) : '';
+}
+
+function selectedHostId() {
+    const v = document.getElementById('trap-host').value;
+    return v ? Number(v) : null;
+}
+
 function openTrapModal(mode, trapId = null) {
     const titleEl = document.getElementById('trap-modal-title');
     const formEl = document.getElementById('create-trap-form');
@@ -1240,6 +1547,7 @@ function openTrapModal(mode, trapId = null) {
         }
         togglePortFields(trap.class);
 
+        populateHostSelect(trap.hostId);
         document.getElementById('trap-name').value  = trap.name || '';
         document.getElementById('trap-bind').value  = trap.bind || '0.0.0.0';
         document.getElementById('trap-port').value  = trap.port || '';
@@ -1257,6 +1565,7 @@ function openTrapModal(mode, trapId = null) {
         if (presetGroup) presetGroup.style.display = '';
         populateClassSelect();
         applyClassDefaults(classSel.value);
+        populateHostSelect(typeof state.currentHostId === 'number' ? state.currentHostId : null);
         document.getElementById('trap-bind').value = '0.0.0.0';
         document.getElementById('trap-active').checked = true;
     }
@@ -1264,103 +1573,220 @@ function openTrapModal(mode, trapId = null) {
     openModal('create-trap-modal');
 }
 
-// Показывает окно с инструкцией запуска агента и ссылками на конфиг/бандл.
+// Окно «ловушка создана»: для ловушки на хосте — предложить применить изменения,
+// для ловушки без хоста — ручной запуск агента с конфигом.
 function showCreatedModal(trap) {
     state.lastCreatedTrap = trap;
-    document.getElementById('created-token').value = trap.token || '';
-    document.getElementById('download-config-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/config`;
-    document.getElementById('download-bundle-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/bundle`;
+    const host = trap.hostId != null ? hostById(trap.hostId) : null;
+    document.getElementById('created-hosted').hidden = !host;
+    document.getElementById('created-loose').hidden = !!host;
+    if (host) {
+        document.getElementById('created-hosted-text').textContent =
+            t('Ловушка добавлена на хост «{host}». Она заработает после того, как вы примените изменения на сервере.')
+                .replace('{host}', host.name);
+    } else {
+        document.getElementById('created-token').value = trap.token || '';
+        document.getElementById('download-config-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/config`;
+        document.getElementById('download-bundle-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/bundle`;
+    }
     openModal('trap-created-modal');
 }
 
-// Куда ловушку развернули в последний раз (хост, порт, логин, способ входа — без паролей).
-function loadDeployTarget(trapId) {
-    try {
-        return JSON.parse(localStorage.getItem(CONFIG.DEPLOY_TARGET_KEY + trapId)) || {};
-    } catch (e) {
-        return {};
+// ---------- Хосты: навигация ----------
+
+// Открыть хост (число), ловушки без хоста ('none') или список (null). Адрес
+// страницы (#host-3) запоминает выбор, чтобы обновление страницы его не сбрасывало.
+function setCurrentHost(id) {
+    state.currentHostId = id;
+    state.selectedTrapId = null;
+    const hash = id === null ? '' : `#host-${id}`;
+    if (window.location.hash !== hash) {
+        history.replaceState(null, '', hash || window.location.pathname + window.location.search);
     }
 }
 
-function saveDeployTarget(trapId, target) {
-    try {
-        localStorage.setItem(CONFIG.DEPLOY_TARGET_KEY + trapId, JSON.stringify(target));
-    } catch (e) { /* localStorage может быть выключен */ }
+function hostFromHash() {
+    const m = /^#host-(\d+|none)$/.exec(window.location.hash);
+    if (!m) return null;
+    return m[1] === 'none' ? 'none' : Number(m[1]);
 }
 
-// Открывает окно SSH: mode 'deploy' — развернуть ловушку, 'undeploy' — снять её с сервера
-function openDeployTrapModal(trapId, mode = 'deploy') {
-    const trap = state.traps.find(t => t.id === Number(trapId));
-    if (!trap) return;
+function openHost(id) {
+    setCurrentHost(id);
+    renderAll();
+    window.scrollTo(0, 0);
+}
 
-    const undeploy = mode === 'undeploy';
-    state.deployingTrapId = trap.id;
-    state.deployMode = mode;
-    const saved = loadDeployTarget(trap.id);
+// ---------- Хосты: окно создания / изменения ----------
 
-    const modalTitle = document.getElementById('deploy-modal-title');
-    if (modalTitle) {
-        modalTitle.textContent = `${t(undeploy ? 'Снятие ловушки' : 'Развертывание ловушки')} «${trap.name}»`;
+function showHostFormError(message) {
+    const el = document.getElementById('host-form-error');
+    if (!el) return;
+    el.textContent = message || '';
+    el.hidden = !message;
+}
+
+function setHostAuthType(type) {
+    const isKey = type === 'key';
+    document.getElementById(isKey ? 'host-auth-key-radio' : 'host-auth-password-radio').checked = true;
+    document.getElementById('host-password-group').style.display = isKey ? 'none' : '';
+    document.getElementById('host-key-group').style.display = isKey ? '' : 'none';
+}
+
+function openHostModal(hostId = null) {
+    const host = hostId !== null ? hostById(hostId) : null;
+    state.editingHostId = host ? host.id : null;
+    document.getElementById('host-form').reset();
+    showHostFormError('');
+
+    document.getElementById('host-modal-title').textContent = t(host ? 'Изменение хоста' : 'Новый хост');
+    document.getElementById('host-name').value = host ? host.name : '';
+    document.getElementById('host-address').value = host ? host.address : '';
+    document.getElementById('host-port').value = String(host ? host.sshPort : 22);
+    document.getElementById('host-username').value = host ? host.username : 'root';
+    setHostAuthType(host ? host.authType : 'password');
+    document.getElementById('host-use-sudo').checked = !!(host && host.useSudo);
+    document.getElementById('host-sudo-password-group').style.display = host && host.useSudo ? '' : 'none';
+
+    // Сохранённые секреты в браузер не приходят: поле пустое, подсказка говорит, что он есть.
+    const savedHint = t('Сохранён — оставьте пустым, чтобы не менять');
+    document.getElementById('host-password').placeholder = host && host.hasPassword ? savedHint : t('Введите пароль пользователя SSH');
+    document.getElementById('host-key').placeholder = host && host.hasPrivateKey
+        ? savedHint
+        : '-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----';
+    document.getElementById('host-sudo-password').placeholder = host && host.hasSudoPassword ? savedHint : t('Оставьте пустым, если совпадает с паролем SSH');
+
+    openModal('host-modal');
+    document.getElementById('host-name').focus();
+}
+
+async function handleSubmitHost(event) {
+    event.preventDefault();
+    showHostFormError('');
+    const editing = state.editingHostId !== null;
+    const host = editing ? hostById(state.editingHostId) : null;
+    const authType = document.querySelector('input[name="host-auth-type"]:checked')?.value || 'password';
+    const password = document.getElementById('host-password').value;
+    const privateKey = document.getElementById('host-key').value.trim();
+
+    const body = {
+        name: document.getElementById('host-name').value.trim(),
+        address: document.getElementById('host-address').value.trim(),
+        sshPort: parseInt(document.getElementById('host-port').value, 10) || 22,
+        username: document.getElementById('host-username').value.trim(),
+        authType,
+        useSudo: document.getElementById('host-use-sudo').checked
+    };
+    // Пустой секрет не отправляем: при изменении хоста это значит «оставить сохранённый».
+    if (authType === 'password' && password) body.password = password;
+    if (authType === 'key' && privateKey) body.privateKey = privateKey;
+    const sudoPassword = document.getElementById('host-sudo-password').value;
+    if (body.useSudo && sudoPassword) body.sudoPassword = sudoPassword;
+
+    // Без секрета для выбранного способа входа сервер всё равно откажет — скажем сразу.
+    if (authType === 'password' && !password && !(host && host.hasPassword)) {
+        showHostFormError(t('Введите пароль SSH.'));
+        return;
     }
-    const subtitle = document.getElementById('deploy-trap-subtitle');
-    if (subtitle) {
-        subtitle.textContent = t(undeploy
-            ? 'Остановка службы honeyforge-agent и удаление агента, его конфига и unit-файла с сервера.'
-            : 'Автоматическая установка агента, настройка службы systemd и запуск ловушки на удаленном Linux-сервере.');
+    if (authType === 'key' && !privateKey && !(host && host.hasPrivateKey)) {
+        showHostFormError(t('Вставьте приватный SSH-ключ.'));
+        return;
     }
 
-    const trapIdInput = document.getElementById('deploy-trap-id');
-    if (trapIdInput) trapIdInput.value = trap.id;
-
-    // Сброс значений полей формы
-    const hostInput = document.getElementById('deploy-host');
-    if (hostInput) hostInput.value = saved.host || '';
-
-    const portInput = document.getElementById('deploy-port');
-    if (portInput) portInput.value = String(saved.port || 22);
-
-    const usernameInput = document.getElementById('deploy-username');
-    if (usernameInput) usernameInput.value = saved.username || 'root';
-
-    const useKey = saved.authType === 'key';
-    const authRadio = document.getElementById(useKey ? 'deploy-auth-key-radio' : 'deploy-auth-password-radio');
-    if (authRadio) authRadio.checked = true;
-
-    const passwordGroup = document.getElementById('deploy-password-group');
-    if (passwordGroup) passwordGroup.style.display = useKey ? 'none' : '';
-
-    const passwordInput = document.getElementById('deploy-password');
-    if (passwordInput) passwordInput.value = '';
-
-    const keyGroup = document.getElementById('deploy-key-group');
-    if (keyGroup) keyGroup.style.display = useKey ? '' : 'none';
-
-    const keyInput = document.getElementById('deploy-key');
-    if (keyInput) keyInput.value = '';
-
-    const sudoCheckbox = document.getElementById('deploy-use-sudo');
-    if (sudoCheckbox) sudoCheckbox.checked = !!saved.useSudo;
-
-    const rootPassGroup = document.getElementById('deploy-root-password-group');
-    if (rootPassGroup) rootPassGroup.style.display = saved.useSudo ? '' : 'none';
-
-    const rootPassInput = document.getElementById('deploy-root-password');
-    if (rootPassInput) rootPassInput.value = '';
-
-    const statusBox = document.getElementById('deploy-status');
-    if (statusBox) statusBox.style.display = 'none';
-
-    const submitBtn = document.getElementById('deploy-submit-btn');
-    if (submitBtn) {
+    const submitBtn = document.getElementById('host-submit-btn');
+    submitBtn.disabled = true;
+    try {
+        const saved = editing ? await api.updateHost(state.editingHostId, body) : await api.createHost(body);
+        closeModal('host-modal');
+        document.getElementById('host-form').reset();
+        await refreshAll();
+        if (!editing && saved && saved.id) openHost(saved.id);
+    } catch (err) {
+        console.error('[handleSubmitHost]', err);
+        showHostFormError(getErrorMessage(err, 'Не удалось сохранить хост.'));
+    } finally {
         submitBtn.disabled = false;
-        submitBtn.textContent = t(undeploy ? 'Остановить и удалить' : 'Развернуть ловушку');
-        submitBtn.className = undeploy ? 'btn btn-danger' : 'btn btn-success';
-        submitBtn.onclick = null;
     }
-
-    openModal('deploy-trap-modal');
 }
 
+// ---------- Хосты: операции по SSH ----------
+
+// Выполняет операцию над хостом, показывая ход и итог в строке под шапкой хоста.
+async function runHostOp(hostId, kind, loadingText, run, describe, errKey) {
+    if (state.hostOps[hostId]) return;
+    state.hostOps[hostId] = kind;
+    state.hostOpResult = { hostId, kind: 'loading', text: t(loadingText) };
+    renderHostView();
+    try {
+        const res = await run();
+        state.hostOpResult = { hostId, ...describe(res) };
+    } catch (err) {
+        console.error(`[host ${kind}]`, err);
+        state.hostOpResult = { hostId, kind: 'error', text: `${t(errKey)}: ${getErrorMessage(err, errKey)}` };
+    } finally {
+        delete state.hostOps[hostId];
+    }
+    await refreshAll();
+}
+
+function deployHost(hostId) {
+    return runHostOp(hostId, 'deploy', 'Развёртывание агента: загрузка, настройка systemd, запуск...',
+        () => api.deployHost(hostId),
+        res => ({ kind: 'success', text: t('Агент развёрнут. Ловушек запущено: {n}.').replace('{n}', res && res.traps != null ? res.traps : '?') }),
+        'Ошибка развертывания');
+}
+
+function undeployHost(hostId) {
+    const host = hostById(hostId);
+    if (!host) return;
+    if (!confirm(t('Снять агента с хоста «{name}»? Все ловушки этого хоста перестанут работать.').replace('{name}', host.name))) return;
+    return runHostOp(hostId, 'undeploy', 'Остановка агента и удаление его файлов с сервера...',
+        () => api.undeployHost(hostId),
+        () => ({ kind: 'success', text: t('Агент снят с сервера: служба остановлена, файлы удалены.') }),
+        'Ошибка снятия агента');
+}
+
+function checkHostStatus(hostId) {
+    return runHostOp(hostId, 'status', 'Подключение к серверу и проверка агента...',
+        () => api.getHostStatus(hostId),
+        st => {
+            const svc = (st && st.subState) || '?';
+            if (!st || !st.active) {
+                return { kind: 'error', text: t('Агент не работает (служба {state}).').replace('{state}', svc) };
+            }
+            const missing = st.missingPorts || [];
+            const ports = missing.length
+                ? t('Не слушаются порты: {ports}.').replace('{ports}', missing.join(', '))
+                : t('Все порты ловушек открыты.');
+            return {
+                kind: missing.length ? 'error' : 'success',
+                text: `${t('Агент работает (служба {state}).').replace('{state}', svc)} ${ports}`
+            };
+        },
+        'Ошибка проверки статуса');
+}
+
+async function handleDeleteHost(hostId) {
+    const host = hostById(hostId);
+    if (!host) return;
+    if (!confirm(t('Удалить хост «{name}»? Его ловушки останутся в разделе «Без хоста».').replace('{name}', host.name))) return;
+    try {
+        try {
+            await api.deleteHost(hostId);
+        } catch (err) {
+            // Агент ещё стоит на сервере: удалять хост без снятия — только по явному согласию.
+            if (err.status !== 409 || err.data?.error !== 'host is deployed; remove the agent first') throw err;
+            if (!confirm(t('На сервере всё ещё работает агент этого хоста. Удалить хост, не снимая агента? Управлять им из центра будет нельзя.'))) return;
+            await api.deleteHost(hostId, { force: true });
+        }
+        if (state.hostOpResult && state.hostOpResult.hostId === hostId) state.hostOpResult = null;
+        setCurrentHost(null);
+        await refreshAll();
+    } catch (err) {
+        console.error('[handleDeleteHost]', err);
+        alert(getErrorMessage(err, 'Не удалось удалить хост.'));
+    }
+}
 
 // 8. ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК
 
@@ -1434,6 +1860,7 @@ async function handleSubmitTrap(event) {
     const params = paramForm.params;
 
     const payload = {
+        hostId:  selectedHostId(),
         name:    document.getElementById('trap-name').value.trim(),
         class:   classId,
         bind:    document.getElementById('trap-bind').value.trim() || '0.0.0.0',
@@ -1446,7 +1873,7 @@ async function handleSubmitTrap(event) {
     try {
         if (state.editingTrapId !== null) {
             // класс не меняем; отправляем изменяемые поля
-            const patch = { name: payload.name, bind: payload.bind, params, enabled: payload.enabled };
+            const patch = { hostId: payload.hostId, name: payload.name, bind: payload.bind, params, enabled: payload.enabled };
             if (multi) patch.ports = payload.ports; else patch.port = payload.port;
             await api.updateTrap(state.editingTrapId, patch);
             closeModal('create-trap-modal');
@@ -1683,15 +2110,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    // --- Поиск ---
-    const trapsSearchEl = document.getElementById('traps-search');
-    if (trapsSearchEl) {
-        trapsSearchEl.addEventListener('input', (e) => {
-            state.searchQuery = e.target.value;
-            renderTraps();
-        });
-    }
-
     // --- Выбор ловушки кликом ---
     const trapsListEl = document.getElementById('traps-list-container');
     if (trapsListEl) {
@@ -1786,30 +2204,82 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    const deployBtn = document.getElementById('open-deploy-trap-btn');
-    if (deployBtn) {
-        deployBtn.addEventListener('click', () => {
-            if (state.selectedTrapId === null) return;
-            openDeployTrapModal(state.selectedTrapId);
-        });
-    }
-
-    const undeployBtn = document.getElementById('open-undeploy-trap-btn');
-    if (undeployBtn) {
-        undeployBtn.addEventListener('click', () => {
-            if (state.selectedTrapId === null) return;
-            openDeployTrapModal(state.selectedTrapId, 'undeploy');
-        });
-    }
-
-    const createdDeployBtn = document.getElementById('created-deploy-btn');
-    if (createdDeployBtn) {
-        createdDeployBtn.addEventListener('click', () => {
-            if (!state.lastCreatedTrap) return;
+    const createdApplyBtn = document.getElementById('created-apply-btn');
+    if (createdApplyBtn) {
+        createdApplyBtn.addEventListener('click', () => {
+            const trap = state.lastCreatedTrap;
             closeModal('trap-created-modal');
-            openDeployTrapModal(state.lastCreatedTrap.id);
+            if (trap && trap.hostId != null) {
+                openHost(trap.hostId);
+                deployHost(trap.hostId);
+            }
         });
     }
+
+    // --- Хосты: список и навигация ---
+    const hostsListEl = document.getElementById('hosts-list-container');
+    if (hostsListEl) {
+        hostsListEl.addEventListener('click', (e) => {
+            const card = e.target.closest('.host-item');
+            if (!card) return;
+            const id = card.dataset.hostId;
+            openHost(id === 'none' ? 'none' : Number(id));
+        });
+    }
+
+    const hostsSearchEl = document.getElementById('hosts-search');
+    if (hostsSearchEl) {
+        hostsSearchEl.addEventListener('input', (e) => {
+            state.hostSearch = e.target.value;
+            renderHosts();
+        });
+    }
+
+    const backToHostsEl = document.getElementById('back-to-hosts');
+    if (backToHostsEl) {
+        backToHostsEl.addEventListener('click', (e) => {
+            e.preventDefault();
+            openHost(null);
+        });
+    }
+
+    // Кнопки «назад/вперёд» браузера и ручная правка адреса.
+    window.addEventListener('hashchange', () => {
+        const id = hostFromHash();
+        if (id !== state.currentHostId) openHost(id);
+    });
+
+    // --- Хосты: кнопки ---
+    const onCurrentHost = (fn) => () => {
+        if (typeof state.currentHostId === 'number') fn(state.currentHostId);
+    };
+    const hostButtons = {
+        'open-create-host-btn': () => openHostModal(),
+        'host-edit-btn': onCurrentHost(openHostModal),
+        'host-deploy-btn': onCurrentHost(deployHost),
+        'host-undeploy-btn': onCurrentHost(undeployHost),
+        'host-status-btn': onCurrentHost(checkHostStatus),
+        'host-delete-btn': onCurrentHost(handleDeleteHost),
+        // Скачивание по ссылке: файл отдаётся с Content-Disposition: attachment.
+        'host-config-btn': onCurrentHost(id => { window.location.href = `${CONFIG.API_BASE_URL}/hosts/${id}/config`; })
+    };
+    for (const [id, handler] of Object.entries(hostButtons)) {
+        const btn = document.getElementById(id);
+        if (btn) btn.addEventListener('click', handler);
+    }
+
+    // --- Окно хоста: способ входа и sudo ---
+    document.querySelectorAll('input[name="host-auth-type"]').forEach(radio => {
+        radio.addEventListener('change', (e) => setHostAuthType(e.target.value));
+    });
+    const hostSudoEl = document.getElementById('host-use-sudo');
+    if (hostSudoEl) {
+        hostSudoEl.addEventListener('change', (e) => {
+            document.getElementById('host-sudo-password-group').style.display = e.target.checked ? '' : 'none';
+        });
+    }
+    const hostFormEl = document.getElementById('host-form');
+    if (hostFormEl) hostFormEl.addEventListener('submit', handleSubmitHost);
 
     // --- Меню пользователя ---
     const userMenuBtn = document.getElementById('user-menu-btn');
@@ -1875,134 +2345,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const registerFormEl = document.getElementById('register-form-el');
     if (registerFormEl) registerFormEl.addEventListener('submit', handleRegister);
 
-    // --- Переключение метода аутентификации в модалке деплоя ---
-    document.querySelectorAll('input[name="deploy-auth-type"]').forEach(radio => {
-        radio.addEventListener('change', (e) => {
-            const isKey = e.target.value === 'key';
-            const passGroup = document.getElementById('deploy-password-group');
-            const keyGroup = document.getElementById('deploy-key-group');
-            if (passGroup) passGroup.style.display = isKey ? 'none' : '';
-            if (keyGroup) keyGroup.style.display = isKey ? '' : 'none';
-        });
-    });
-
-    // --- Переключение sudo в модалке деплоя ---
-    const sudoCheckbox = document.getElementById('deploy-use-sudo');
-    if (sudoCheckbox) {
-        sudoCheckbox.addEventListener('change', (e) => {
-            const rootPassGroup = document.getElementById('deploy-root-password-group');
-            if (rootPassGroup) rootPassGroup.style.display = e.target.checked ? '' : 'none';
-        });
-    }
-
-    // --- Отправка формы деплоя ---
-    const deployFormEl = document.getElementById('deploy-trap-form');
-    if (deployFormEl) {
-        deployFormEl.addEventListener('submit', async (e) => {
-            e.preventDefault();
-
-            const trapId = Number(document.getElementById('deploy-trap-id').value);
-            const host = document.getElementById('deploy-host').value.trim();
-            const port = parseInt(document.getElementById('deploy-port').value, 10) || 22;
-            const username = document.getElementById('deploy-username').value.trim();
-            const authType = document.querySelector('input[name="deploy-auth-type"]:checked')?.value || 'password';
-            const password = document.getElementById('deploy-password').value;
-            const privateKey = document.getElementById('deploy-key').value.trim();
-            const useSudo = document.getElementById('deploy-use-sudo').checked;
-            const rootPassword = document.getElementById('deploy-root-password').value;
-
-            const statusBox = document.getElementById('deploy-status');
-            const statusText = document.getElementById('deploy-status-text');
-            const spinner = document.getElementById('deploy-spinner');
-            const submitBtn = document.getElementById('deploy-submit-btn');
-
-            if (!host) {
-                if (statusBox && statusText) {
-                    statusBox.style.display = 'flex';
-                    statusBox.className = 'deploy-status-box deploy-status-error';
-                    spinner.style.display = 'none';
-                    statusText.textContent = t('Укажите хост сервера');
-                }
-                return;
-            }
-
-            if (!username) {
-                if (statusBox && statusText) {
-                    statusBox.style.display = 'flex';
-                    statusBox.className = 'deploy-status-box deploy-status-error';
-                    spinner.style.display = 'none';
-                    statusText.textContent = t('Укажите имя пользователя SSH');
-                }
-                return;
-            }
-
-            if (authType === 'password' && !password) {
-                if (statusBox && statusText) {
-                    statusBox.style.display = 'flex';
-                    statusBox.className = 'deploy-status-box deploy-status-error';
-                    spinner.style.display = 'none';
-                    statusText.textContent = t('Введите пароль SSH');
-                }
-                return;
-            }
-
-            if (authType === 'key' && !privateKey) {
-                if (statusBox && statusText) {
-                    statusBox.style.display = 'flex';
-                    statusBox.className = 'deploy-status-box deploy-status-error';
-                    spinner.style.display = 'none';
-                    statusText.textContent = t('Вставьте приватный SSH-ключ');
-                }
-                return;
-            }
-
-            // Показываем индикатор выполнения
-            statusBox.style.display = 'flex';
-            statusBox.className = 'deploy-status-box deploy-status-loading';
-            spinner.style.display = 'block';
-            const undeploy = state.deployMode === 'undeploy';
-            statusText.textContent = t(undeploy ? 'Подключение к серверу и остановка агента...' : 'Подключение к серверу и установка агента...');
-            submitBtn.disabled = true;
-
-            const payload = {
-                host,
-                port,
-                username,
-                password: authType === 'password' ? password : '',
-                privateKey: authType === 'key' ? privateKey : '',
-                useSudo,
-                rootPassword
-            };
-
-            try {
-                const res = undeploy ? await api.undeployTrap(trapId, payload) : await api.deployTrap(trapId, payload);
-                saveDeployTarget(trapId, { host, port, username, authType, useSudo });
-                statusBox.className = 'deploy-status-box deploy-status-success';
-                spinner.style.display = 'none';
-                statusText.textContent = undeploy
-                    ? `${t('Ловушка снята с сервера')} ${res.host || host}. ${t('Служба остановлена, файлы агента удалены.')}`
-                    : `${t('Ловушка успешно развернута на')} ${res.host || host}! ${t('Служба honeyforge-agent запущена.')}`;
-                submitBtn.disabled = false;
-                submitBtn.textContent = t('Закрыть');
-                submitBtn.className = 'btn btn-secondary';
-                submitBtn.onclick = (ev) => {
-                    ev.preventDefault();
-                    closeModal('deploy-trap-modal');
-                    submitBtn.onclick = null;
-                };
-
-                // Обновляем список ловушек
-                await refreshAll();
-            } catch (err) {
-                statusBox.className = 'deploy-status-box deploy-status-error';
-                spinner.style.display = 'none';
-                const errKey = undeploy ? 'Ошибка снятия ловушки' : 'Ошибка развертывания';
-                statusText.textContent = `${t(errKey)}: ${getErrorMessage(err, errKey)}`;
-                submitBtn.disabled = false;
-            }
-        });
-    }
-
     // --- Первичный перевод, восстановление сессии, загрузка данных ---
     translateStatic();
 
@@ -2010,6 +2352,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const isLogin = !!document.getElementById('login-form-el') && !isDashboard;
 
     if (isDashboard) {
+        state.currentHostId = hostFromHash();
         await restoreSession();
         await loadCatalog();
         await refreshAll();
