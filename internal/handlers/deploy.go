@@ -1,16 +1,24 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"honeyprower/internal/deploy"
 	"honeyprower/internal/httpx"
 	"honeyprower/internal/storage"
 )
+
+// deployTimeout покрывает загрузку бинарника агента на медленный канал и проверку запуска службы.
+const deployTimeout = 3 * time.Minute
 
 type deployResponse struct {
 	Status string `json:"status"`
@@ -63,6 +71,22 @@ func (h *Handlers) HandleDeployTrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := h.buildConfig(r, trap)
+	// Агент на другой машине не достучится до центра по localhost: подставляем адрес центра,
+	// видимый из сети цели. Если цель — сама машина центра, localhost подходит как есть.
+	if isLoopbackHost(hostOf(cfg.CenterURL)) && !isLocalHost(target.Host) {
+		u, _ := url.Parse(cfg.CenterURL)
+		ip, err := outboundIP(target.Host, target.Port)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "center url is loopback; set PUBLIC_URL")
+			return
+		}
+		if port := u.Port(); port != "" {
+			u.Host = net.JoinHostPort(ip, port)
+		} else {
+			u.Host = ip
+		}
+		cfg.CenterURL = u.String()
+	}
 	cfgBytes, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to marshal agent config")
@@ -94,7 +118,12 @@ func (h *Handlers) HandleDeployTrap(w http.ResponseWriter, r *http.Request) {
 		ConfigJSON:     cfgBytes,
 	}
 
-	if err := h.Deployer.Deploy(r.Context(), target, payload); err != nil {
+	// Общий WriteTimeout сервера (15 с) оборвал бы ответ посреди деплоя.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(deployTimeout + 10*time.Second))
+	ctx, cancel := context.WithTimeout(r.Context(), deployTimeout)
+	defer cancel()
+
+	if err := h.Deployer.Deploy(ctx, target, payload); err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -104,4 +133,53 @@ func (h *Handlers) HandleDeployTrap(w http.ResponseWriter, r *http.Request) {
 		TrapID: id,
 		Host:   target.Host,
 	})
+}
+
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLocalHost сообщает, указывает ли host на эту же машину (loopback или адрес её интерфейса).
+func isLocalHost(host string) bool {
+	if isLoopbackHost(host) {
+		return true
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// outboundIP возвращает локальный адрес, с которого эта машина ходит к host (UDP-«соединение» пакетов не шлёт).
+func outboundIP(host string, port int) (string, error) {
+	conn, err := net.Dial("udp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
 }

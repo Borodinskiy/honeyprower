@@ -28,32 +28,11 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-honeyforge}
       DB_NAME: ${DB_NAME:-honeyforge}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      # Внешний адрес центра, который увидят агенты на удалённых серверах (нужен для деплоя по SSH).
+      PUBLIC_URL: ${PUBLIC_URL:-}
     ports:
       - "${WEB_PORT:-8080}:8080"
 
-  # Демо-ловушка low: SSH-баннер. Агент на Rust, конфиг едет с ним.
-  ssh-trap:
-    build:
-      context: ./agent
-    restart: unless-stopped
-    depends_on:
-      - app
-    volumes:
-      - ./deploy/agent-configs/ssh.json:/config/config.json:ro,Z
-    ports:
-      - "${SSH_TRAP_PORT:-2222}:2222"
-
-  # Демо-ловушка medium: fake-FTP с захватом логинов/паролей.
-  ftp-trap:
-    build:
-      context: ./agent
-    restart: unless-stopped
-    depends_on:
-      - app
-    volumes:
-      - ./deploy/agent-configs/ftp.json:/config/config.json:ro,Z
-    ports:
-      - "${FTP_TRAP_PORT:-2121}:2121"
 
 volumes:
   pgdata:

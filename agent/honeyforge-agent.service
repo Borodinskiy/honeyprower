@@ -5,7 +5,6 @@ After=network.target
 [Service]
 Type=simple
 User=nobody
-Group=nogroup
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 Environment="HF_CONFIG=/etc/honeyforge/config.json"

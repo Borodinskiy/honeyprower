@@ -156,13 +156,29 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	activationCmd := "systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service"
+	activationCmd := activateCmd
 	if err := d.runCommand(client, target, activationCmd); err != nil {
 		return fmt.Errorf("failed to activate honeyforge-agent service: %w", err)
 	}
 
+	// 6. Make sure the agent stays up: a crash on start (bad unit, missing glibc,
+	// busy port) is otherwise invisible because systemctl restart returns at once.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := d.runCommand(client, target, verifyCmd); err != nil {
+		return fmt.Errorf("honeyforge-agent service is not running: %w", err)
+	}
+
 	return nil
 }
+
+// activateCmd resets SELinux labels first: files moved from /tmp keep user_tmp_t and systemd refuses to exec them (203/EXEC).
+const activateCmd = "if command -v restorecon >/dev/null 2>&1; then restorecon -F /usr/local/bin/honeyforge-agent /etc/honeyforge/config.json /etc/systemd/system/honeyforge-agent.service; fi; " +
+	"systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service"
+
+// verifyCmd waits for the agent to settle and prints its journal tail to stderr when it is not active.
+const verifyCmd = "sleep 3; systemctl is-active --quiet honeyforge-agent.service || { journalctl -u honeyforge-agent.service -n 15 --no-pager >&2; exit 1; }"
 
 func (d *SSHDeployer) uploadFile(client *ssh.Client, remotePath string, content []byte) error {
 	session, err := client.NewSession()

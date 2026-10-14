@@ -171,7 +171,7 @@ const api = {
             }
             return { status: 'deployed', trapId: Number(id), host: target.host };
         }
-        return this._request(`/traps/${id}/deploy`, { method: 'POST', body: target, timeout: 60000 });
+        return this._request(`/traps/${id}/deploy`, { method: 'POST', body: target, timeout: 240000 });
     },
 
     async getTrapEvents(id, type = '') {
@@ -426,7 +426,8 @@ const SERVER_ERROR_LABELS = {
     'deployer service unavailable': 'Служба деплоя недоступна на сервере.',
     'systemd unit file not found': 'Unit-файл systemd не найден на сервере.',
     'failed to read systemd service file': 'Не удалось прочитать unit-файл службы systemd.',
-    'agent binary not found; please build the agent first': 'Бинарный файл агента не найден на сервере.'
+    'agent binary not found; please build the agent first': 'Бинарный файл агента не найден на сервере.',
+    'center url is loopback; set PUBLIC_URL': 'Центр открыт по localhost — агент на удалённом сервере не сможет до него достучаться. Задайте PUBLIC_URL (внешний адрес центра) и перезапустите центр.'
 };
 
 const I18N_REVERSE = Object.fromEntries(
@@ -1851,7 +1852,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (err) {
                 statusBox.className = 'deploy-status-box deploy-status-error';
                 spinner.style.display = 'none';
-                statusText.textContent = `${t('Ошибка развертывания')}: ${err.message}`;
+                statusText.textContent = `${t('Ошибка развертывания')}: ${getErrorMessage(err, 'Ошибка развертывания')}`;
                 submitBtn.disabled = false;
             }
         });

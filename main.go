@@ -132,6 +132,11 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 	webMux := http.NewServeMux()
 	if proxy != nil {
 		webMux.Handle("/api/", proxy)
+		// Деплой по SSH идёт дольше WriteTimeout веб-сервера — продлеваем срок только для него.
+		webMux.Handle("POST /api/traps/{id}/deploy", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(4 * time.Minute))
+			proxy.ServeHTTP(w, r)
+		}))
 		webMux.Handle("/cdn-cgi/rum", proxy)
 		webMux.Handle("/v1/rgstr", proxy)
 		webMux.Handle("/api/v2/metrics", proxy)
