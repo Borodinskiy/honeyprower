@@ -36,6 +36,8 @@ type mockSSHServer struct {
 	allowedUsers   map[string]string        // username -> password
 	allowedPubKeys map[string]ssh.PublicKey // username -> public key
 	failCommands   map[string]string        // command substring -> stderr
+	cmdOutputs     map[string]string        // command substring -> stdout
+	cmdExitCodes   map[string]uint32        // command substring -> exit code
 }
 
 func newMockSSHServer(t *testing.T) *mockSSHServer {
@@ -56,7 +58,10 @@ func newMockSSHServer(t *testing.T) *mockSSHServer {
 		allowedUsers:   make(map[string]string),
 		allowedPubKeys: make(map[string]ssh.PublicKey),
 		failCommands:   make(map[string]string),
+		cmdOutputs:     make(map[string]string),
+		cmdExitCodes:   make(map[string]uint32),
 	}
+
 
 	serverConfig := &ssh.ServerConfig{
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
@@ -161,6 +166,43 @@ func (s *mockSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 					}
 				}
 			}
+
+			// Check stdout output
+			var stdoutData string
+			if out, ok := s.cmdOutputs[cmd]; ok {
+				stdoutData = out
+			} else {
+				for k, v := range s.cmdOutputs {
+					if strings.Contains(cmd, k) {
+						stdoutData = v
+						break
+					}
+				}
+			}
+
+			// Default responses for lifecycle commands if not overridden
+			if stdoutData == "" && !shouldFail {
+				if strings.Contains(cmd, "is-active") {
+					stdoutData = "active\n"
+				} else if strings.Contains(cmd, "ss -tlpn") || strings.Contains(cmd, "netstat") {
+					stdoutData = "LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:((\"honeyforge-agent\",pid=1234,fd=3))\n"
+				} else if strings.Contains(cmd, "ActiveEnterTimestamp") {
+					stdoutData = "Wed 2026-10-14 20:00:00 UTC\n"
+				}
+			}
+
+			// Custom exit code
+			var exitCode uint32
+			if code, ok := s.cmdExitCodes[cmd]; ok {
+				exitCode = code
+			} else {
+				for k, v := range s.cmdExitCodes {
+					if strings.Contains(cmd, k) {
+						exitCode = v
+						break
+					}
+				}
+			}
 			s.mu.Unlock()
 
 			if strings.HasPrefix(cmd, "cat > ") {
@@ -177,16 +219,25 @@ func (s *mockSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 				s.mu.Unlock()
 			}
 
+			if stdoutData != "" {
+				_, _ = channel.Write([]byte(stdoutData))
+			}
+
 			if shouldFail {
 				_, _ = channel.Stderr().Write([]byte(failStderr))
-				exitStatus := struct{ Status uint32 }{Status: 1}
+				statusVal := uint32(1)
+				if exitCode != 0 {
+					statusVal = exitCode
+				}
+				exitStatus := struct{ Status uint32 }{Status: statusVal}
 				_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(exitStatus))
 				return
 			}
 
-			exitStatus := struct{ Status uint32 }{Status: 0}
+			exitStatus := struct{ Status uint32 }{Status: exitCode}
 			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(exitStatus))
 			return
+
 
 		case "env":
 			_ = req.Reply(true, nil)
@@ -741,5 +792,289 @@ func TestTargetConfig_UnmarshalJSON(t *testing.T) {
 	var cfg3 TargetConfig
 	if err := cfg3.UnmarshalJSON([]byte("invalid json")); err == nil {
 		t.Error("expected error for invalid json, got nil")
+	}
+}
+
+func TestDeploy_Lifecycle_Status(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	deployer := NewSSHDeployer()
+	deployer.Timeout = 5 * time.Second
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	status, err := deployer.Status(ctx, target)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if !status.Active {
+		t.Errorf("expected Active to be true")
+	}
+	if status.SubState != "active" {
+		t.Errorf("expected SubState 'active', got %q", status.SubState)
+	}
+	if !status.Loaded {
+		t.Errorf("expected Loaded to be true")
+	}
+	if len(status.Listening) == 0 || status.Listening[0] != 2222 {
+		t.Errorf("expected listening port 2222, got %v", status.Listening)
+	}
+	if status.Uptime == "" {
+		t.Errorf("expected non-empty uptime")
+	}
+}
+
+func TestDeploy_Lifecycle_Status_Inactive(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	server.cmdOutputs["is-active"] = "inactive\n"
+	server.cmdExitCodes["is-active"] = 3
+
+	deployer := NewSSHDeployer()
+	deployer.Timeout = 5 * time.Second
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	status, err := deployer.Status(context.Background(), target)
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if status.Active {
+		t.Errorf("expected Active false, got true")
+	}
+	if status.SubState != "inactive" {
+		t.Errorf("expected SubState 'inactive', got %q", status.SubState)
+	}
+	if !status.Loaded {
+		t.Errorf("expected Loaded true for inactive unit")
+	}
+}
+
+func TestDeploy_Lifecycle_Restart(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	if err := deployer.Restart(context.Background(), target); err != nil {
+		t.Fatalf("Restart failed: %v", err)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	found := false
+	for _, cmd := range server.commands {
+		if strings.Contains(cmd, "systemctl restart honeyforge-agent.service") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected restart command in %v", server.commands)
+	}
+}
+
+func TestDeploy_Lifecycle_Restart_Failure(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	server.failCommands["systemctl restart"] = "unit honeyforge-agent.service not found"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	err := deployer.Restart(context.Background(), target)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to restart") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDeploy_Lifecycle_Stop(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	if err := deployer.Stop(context.Background(), target); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	found := false
+	for _, cmd := range server.commands {
+		if strings.Contains(cmd, "systemctl stop honeyforge-agent.service") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected stop command in %v", server.commands)
+	}
+}
+
+func TestDeploy_Lifecycle_Stop_Failure(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	server.failCommands["systemctl stop"] = "service cannot be stopped"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	err := deployer.Stop(context.Background(), target)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to stop") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDeploy_Lifecycle_Uninstall(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	if err := deployer.Uninstall(context.Background(), target); err != nil {
+		t.Fatalf("Uninstall failed: %v", err)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	expectedCmd := "systemctl stop honeyforge-agent.service 2>/dev/null; systemctl disable honeyforge-agent.service 2>/dev/null; rm -f /etc/systemd/system/honeyforge-agent.service /usr/local/bin/honeyforge-agent; rm -rf /etc/honeyforge; systemctl daemon-reload 2>/dev/null"
+	found := false
+	for _, cmd := range server.commands {
+		if cmd == expectedCmd {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected uninstall command %q, got: %v", expectedCmd, server.commands)
+	}
+}
+
+func TestDeploy_Lifecycle_Uninstall_Failure(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	server.failCommands["rm -f /etc/systemd/system"] = "read-only filesystem"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	err := deployer.Uninstall(context.Background(), target)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to uninstall") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDeploy_Preflight_Check(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	if err := deployer.PreflightCheck(context.Background(), target); err != nil {
+		t.Fatalf("PreflightCheck failed: %v", err)
+	}
+
+	server.mu.Lock()
+	server.failCommands["test -w /tmp"] = "permission denied"
+	server.mu.Unlock()
+
+	err := deployer.PreflightCheck(context.Background(), target)
+	if err == nil {
+		t.Fatal("expected preflight error, got nil")
+	}
+	if !strings.Contains(err.Error(), "insufficient write permissions") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDeploy_HealthCheck(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+	deployer := NewSSHDeployer()
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "root",
+		Password: "rootpass",
+	}
+
+	if err := deployer.HealthCheck(context.Background(), target); err != nil {
+		t.Fatalf("HealthCheck failed: %v", err)
+	}
+
+	server.mu.Lock()
+	server.cmdOutputs["is-active"] = "failed\n"
+	server.cmdExitCodes["is-active"] = 1
+	server.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	err := deployer.HealthCheck(ctx, target)
+	if err == nil {
+		t.Fatal("expected healthcheck timeout error, got nil")
 	}
 }
