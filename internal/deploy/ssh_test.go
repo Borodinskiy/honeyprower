@@ -62,7 +62,6 @@ func newMockSSHServer(t *testing.T) *mockSSHServer {
 		cmdExitCodes:   make(map[string]uint32),
 	}
 
-
 	serverConfig := &ssh.ServerConfig{
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			s.mu.Lock()
@@ -237,7 +236,6 @@ func (s *mockSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 			exitStatus := struct{ Status uint32 }{Status: exitCode}
 			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(exitStatus))
 			return
-
 
 		case "env":
 			_ = req.Reply(true, nil)

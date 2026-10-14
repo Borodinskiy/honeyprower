@@ -17,7 +17,7 @@ type Class struct {
 	ID            string          `json:"id"`
 	Title         string          `json:"title"`
 	Description   string          `json:"description"`
-	Level         string          `json:"level"` // Low | Medium | High | ICS/SCADA
+	Level         string          `json:"level"`     // Low | Medium | High | ICS/SCADA
 	Transport     string          `json:"transport"` // tcp | udp
 	MultiPort     bool            `json:"multiPort"`
 	DefaultPort   int             `json:"defaultPort"`

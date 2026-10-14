@@ -852,4 +852,3 @@ func TestStealth_TokenMismatch(t *testing.T) {
 		t.Fatalf("expected 0 events in storage, got %d", len(events))
 	}
 }
-

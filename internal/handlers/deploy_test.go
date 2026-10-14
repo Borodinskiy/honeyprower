@@ -478,14 +478,14 @@ func TestDeployTrap_Lifecycle_Status(t *testing.T) {
 	}
 
 	var resp struct {
-		Active         bool     `json:"active"`
-		SubState       string   `json:"subState"`
-		Loaded         bool     `json:"loaded"`
-		ListeningPorts []int    `json:"listeningPorts"`
-		Uptime         string   `json:"uptime"`
-		Status         string   `json:"status"`
-		TrapID         int64    `json:"trapId"`
-		Host           string   `json:"host"`
+		Active         bool   `json:"active"`
+		SubState       string `json:"subState"`
+		Loaded         bool   `json:"loaded"`
+		ListeningPorts []int  `json:"listeningPorts"`
+		Uptime         string `json:"uptime"`
+		Status         string `json:"status"`
+		TrapID         int64  `json:"trapId"`
+		Host           string `json:"host"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)

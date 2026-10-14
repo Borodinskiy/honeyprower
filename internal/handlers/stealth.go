@@ -141,7 +141,6 @@ type StealthPayload struct {
 	Events []models.IngestEvent `json:"e"`
 }
 
-
 // GenerateTrapCrypto generates KeyID and an X25519 keypair for a given trap token.
 // keyID is the first 8 bytes of SHA-256 of the token (16 lowercase hex characters).
 // pubHex and privHex are 64 lowercase hex characters (32 bytes each).

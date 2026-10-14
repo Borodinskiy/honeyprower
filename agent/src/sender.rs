@@ -606,6 +606,7 @@ mod de {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn test_send_http_nolinger_204_success() {
