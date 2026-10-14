@@ -1,20 +1,21 @@
 services:
   db:
-    image: docker.io/library/postgres:18-alpine
+    image: docker.io/library/postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER:-honeyforge}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-honeyforge}
       POSTGRES_DB: ${DB_NAME:-honeyforge}
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - pgdata:/var/lib/postgresql
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 3s
       timeout: 3s
       retries: 20
 
-  # Центр управления: сайт оператора + API + приём телеметрии.
+  # Центр управления: веб-интерфейс оператора + API + приём скрытной телеметрии.
   app:
     build: .
     restart: unless-stopped
@@ -31,7 +32,7 @@ services:
     ports:
       - "${WEB_PORT:-8080}:8080"
 
-  # Демо-ловушка low: SSH-баннер. Агент на Rust, конфиг едет с ним.
+  # Демо-ловушка Low Interaction: SSH-баннер.
   ssh-trap:
     build:
       context: ./agent
@@ -43,7 +44,7 @@ services:
     ports:
       - "${SSH_TRAP_PORT:-2222}:2222"
 
-  # Демо-ловушка medium: fake-FTP с захватом логинов/паролей.
+  # Демо-ловушка Medium Interaction: fake-FTP с перехватом учетных данных.
   ftp-trap:
     build:
       context: ./agent
