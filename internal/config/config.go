@@ -1,5 +1,8 @@
 package config
 
+// Содержит структуру для хранения параметров конфигурации сервера
+// Переменные окружения имеют приоритет
+
 import (
 	"net"
 	"net/url"
@@ -15,6 +18,7 @@ type Config struct {
 	DBDSN     string // DSN подключение к базе данных PostgreSQL
 
 	AllowRegistration bool   // разрешена ли самостоятельная регистрация операторов
+	FallbackInMemory  bool   // использовать ли базу данных в ОЗУ при ошибке подключения к настоящей бд
 	PublicURL         string // внешний адрес центра для агентов (в config.json); пусто — из запроса
 }
 
@@ -28,10 +32,12 @@ func Load() *Config {
 		DBDSN:     getDBDSN(),
 
 		AllowRegistration: getbool("ALLOW_REGISTRATION", true),
+		FallbackInMemory:  getbool("FALLBACK_INMEMORY", false),
 		PublicURL:         os.Getenv("PUBLIC_URL"),
 	}
 }
 
+// Формирует DBSSN строку для подключения к базе данных
 func getDBDSN() string {
 	if dsn := os.Getenv("DB_DSN"); dsn != "" {
 		return dsn

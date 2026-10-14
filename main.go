@@ -1,5 +1,7 @@
 package main
 
+// Начало начал
+
 import (
 	"context"
 	"errors"
@@ -23,47 +25,55 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	honeycfg := config.Load()
 
 	// ---------- Database ----------
-	var store storage.Storage
+	var dbStorage storage.Storage
+	// Сюда попадает функция для закрытия базы данных
 	var closeStore func() error
-	pgStore, err := storage.NewPostgres(context.Background(), cfg.DBDSN)
+	pgDatabase, err := storage.NewPostgres(context.Background(), honeycfg.DBDSN)
 	if err != nil {
-		log.Printf("failed to initialize postgres storage (%v), falling back to in-memory store", err)
-		memStore := storage.NewInMemory()
-		storage.Seed(memStore)
-		store = memStore
+		log.Printf("failed to initialize postgres storage (%v)", err)
+		if !honeycfg.FallbackInMemory {
+			log.Fatal("Ending operation")
+			os.Exit(1)
+		}
+		// В случае ошибки открытия postgres все данные хранятся в оперативной памяти
+		log.Printf("falling back to in-memory store")
+		memDatabase := storage.NewInMemory()
+		// Заполнение тестовыми данными
+		storage.Seed(memDatabase)
+		dbStorage = memDatabase
 	} else {
-		store = pgStore
-		closeStore = pgStore.Close
+		dbStorage = pgDatabase
+		closeStore = pgDatabase.Close
 	}
 
 	authMgr := auth.NewManager()
-	h := handlers.New(store, authMgr)
-	h.AllowRegistration = cfg.AllowRegistration
-	h.PublicURL = cfg.PublicURL
-	if !cfg.AllowRegistration {
-		log.Println("self-registration is disabled (ALLOW_REGISTRATION=false)")
+	handlers := handlers.New(dbStorage, authMgr)
+	handlers.AllowRegistration = honeycfg.AllowRegistration
+	handlers.PublicURL = honeycfg.PublicURL
+	if !honeycfg.AllowRegistration {
+		log.Println("WARN: self-registration is disabled in configuration")
 	}
 
 	// ---------- API server ----------
 	apiSrv := &http.Server{
-		Addr:         cfg.APIAddr,
-		Handler:      router.NewAPI(h, authMgr),
+		Addr:         honeycfg.APIAddr,
+		Handler:      router.NewAPI(handlers, authMgr),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
 	// ---------- Web server ----------
-	apiURL, _ := url.Parse("http://" + cfg.APIAddr)
+	apiURL, _ := url.Parse("http://" + honeycfg.APIAddr)
 	proxy := httputil.NewSingleHostReverseProxy(apiURL)
 
-	webMux := NewWebMux(cfg, authMgr, proxy)
+	webMux := NewWebMux(honeycfg, authMgr, proxy)
 
 	webSrv := &http.Server{
-		Addr:         cfg.WebAddr,
+		Addr:         honeycfg.WebAddr,
 		Handler:      webMux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -77,13 +87,13 @@ func main() {
 	// Ошибки запуска серверов попадают в errCh.
 	// http.ErrServerClosed значит, что сервер был выключен вручную, по сути не ошибка запуска, поэтому скип
 	go func() {
-		log.Printf("web server  → http://%s   (static dir: %s)", cfg.WebAddr, cfg.StaticDir)
+		log.Printf("web server  → http://%s   (static dir: %s)", honeycfg.WebAddr, honeycfg.StaticDir)
 		if err := webSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
 	go func() {
-		log.Printf("api server  → http://%s", cfg.APIAddr)
+		log.Printf("api server  → http://%s", honeycfg.APIAddr)
 		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

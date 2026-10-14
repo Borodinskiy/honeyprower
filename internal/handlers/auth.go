@@ -1,5 +1,7 @@
 package handlers
 
+// Обработчик HTTP запросов на авторизацию
+
 import (
 	"errors"
 	"net/http"
@@ -19,49 +21,62 @@ const (
 	minPasswordLen = 6
 )
 
+// Обработка запроса входа пользователя
 func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
+	// Подготовка декодирования запроса на вход
 	var in models.LoginRequest
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
+	// Убираем пробелы на концах строки с именем пользователя, если они есть
 	in.Username = strings.TrimSpace(in.Username)
-	if in.Username == "" || in.Password == "" {
+	// Проверка, что данные пустые
+	if len(in.Username) == 0 || len(in.Password) == 0 {
 		httpx.WriteError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
 
+	// Получение пользователя и проверка, что он существует
 	user, err := h.Store.GetUserByUsername(r.Context(), in.Username)
+	// Тут ошибка только если не удалось загрузить СУЩЕСТВУЮЩЕГО пользователя
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to load user")
 		return
 	}
+	// Если пользователь не существует, то делаем фейк движуху
 	if user == nil {
 		// тратим то же время, что и на настоящую проверку, чтобы не выдавать существование логина
 		h.Auth.SimulatePasswordCheck(in.Password)
 		httpx.WriteError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
+
+	// Проверка пароля пользователя
 	if !h.Auth.CheckPassword(user.PasswordHash, in.Password) {
 		httpx.WriteError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 
+	// Наконец, если всё прошли, обрабатываем начало сессии
 	h.startSession(w, r, user)
 }
 
+// Обработка запроса регистрации пользователя
 func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
+	// Проверка на запрет регистрации
 	if !h.AllowRegistration {
 		httpx.WriteError(w, http.StatusForbidden, "registration is disabled")
 		return
 	}
 
+	// Чтение данных регистрации из запроса
 	var in models.RegisterRequest
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
 	in.Username = strings.TrimSpace(in.Username)
 	in.Email = strings.TrimSpace(in.Email)
-	if in.Username == "" || in.Email == "" || in.Password == "" {
+	if len(in.Username) == 0 || len(in.Email) == 0 || len(in.Password) == 0 {
 		httpx.WriteError(w, http.StatusBadRequest, "username, email and password are required")
 		return
 	}
@@ -104,10 +119,11 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 	h.startSession(w, r, user)
 }
 
+// Обработка выхода из пользователя
 func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 	var token string
-	if c, err := r.Cookie(middleware.SessionCookie); err == nil {
-		token = strings.TrimSpace(c.Value)
+	if cookie, err := r.Cookie(middleware.SessionCookie); err == nil {
+		token = strings.TrimSpace(cookie.Value)
 	}
 	if token == "" {
 		token = middleware.BearerToken(r)
@@ -134,7 +150,7 @@ func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, user)
 }
 
-// startSession выдаёт токен, ставит cookie и отвечает AuthResponse.
+// Завершает авторизацию
 func (h *Handlers) startSession(w http.ResponseWriter, r *http.Request, user *models.User) {
 	token, err := h.Auth.CreateToken(user.ID)
 	if err != nil {
@@ -145,6 +161,7 @@ func (h *Handlers) startSession(w http.ResponseWriter, r *http.Request, user *mo
 	httpx.WriteJSON(w, http.StatusOK, models.AuthResponse{Token: token, User: user})
 }
 
+// Для переданного запроса задаёт cookie и сохраняет это в ответе
 func setSessionCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     middleware.SessionCookie,

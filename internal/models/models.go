@@ -1,5 +1,7 @@
 package models
 
+// Структуры для де/кодирования из/в json
+
 import (
 	"encoding/json"
 	"time"

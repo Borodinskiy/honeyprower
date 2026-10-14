@@ -1,5 +1,7 @@
 package handlers
 
+// Обработчик HTTP запросов на события ловушек
+
 import (
 	"errors"
 	"net/http"

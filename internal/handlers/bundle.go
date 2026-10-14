@@ -1,5 +1,7 @@
 package handlers
 
+// Обработчик HTTP запросов на получение ловушки
+
 import (
 	"archive/zip"
 	"bytes"
@@ -14,8 +16,9 @@ import (
 	"honeyprower/internal/storage"
 )
 
-// agentTrap / agentConfig mirror the Rust agent's config.rs. The config travels
-// with the binary; nothing comes back from the center.
+// Соответствует конфигурации нашей ловушки из config.rs.
+// Конфигурация отправляется вместе со скомпиленным файлом.
+// Никакие запросы в сервер на получение конифгурации от ловушки поступать не должны.
 type agentTrap struct {
 	Class  string          `json:"class"`
 	Bind   string          `json:"bind"`
@@ -25,6 +28,7 @@ type agentTrap struct {
 	Params json.RawMessage `json:"params"`
 }
 
+// Конфигурация агента для отправки логов
 type agentConfig struct {
 	CenterURL     string    `json:"center_url"`
 	Token         string    `json:"token"`
@@ -37,6 +41,7 @@ type agentConfig struct {
 	Trap          agentTrap `json:"trap"`
 }
 
+// Собрать конфигурационный файл развёртывания ловушки
 func (h *Handlers) buildConfig(r *http.Request, t *models.Trap) agentConfig {
 	params := t.Params
 	if len(params) == 0 {
@@ -62,23 +67,27 @@ func (h *Handlers) buildConfig(r *http.Request, t *models.Trap) agentConfig {
 	}
 }
 
-// centerURL is where the agent should reach this center. PublicURL wins; else
-// it is derived from the request that fetched the config.
+// Получить URL сервера, куда агент сохраняет логи.
+// PublicURL в приоритете, иначе ссылка берётся из запроса, который просил конфигурацию
+// TODO: разобраться с функционалом при хостинге с https.
 func (h *Handlers) centerURL(r *http.Request) string {
 	if h.PublicURL != "" {
 		return strings.TrimRight(h.PublicURL, "/")
 	}
 	scheme := "http"
+	// Определение вида соединения (http/https), если сервер спрятан за прокси (например, nginx)
 	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 		scheme = "https"
 	}
 	host := r.Host
+	// Fallback на локальный хостинг (зачем? а я ебу)
 	if host == "" {
 		host = "127.0.0.1:8080"
 	}
 	return scheme + "://" + host
 }
 
+// Возвращает информацию об скачиваемой ловушке
 func (h *Handlers) trapForDownload(w http.ResponseWriter, r *http.Request) (*models.Trap, bool) {
 	id, err := parseID(r.PathValue("id"))
 	if err != nil {
@@ -97,7 +106,7 @@ func (h *Handlers) trapForDownload(w http.ResponseWriter, r *http.Request) (*mod
 	return trap, true
 }
 
-// TrapConfig serves the agent config.json for a trap.
+// Отправляет конфиг ловушки.
 func (h *Handlers) TrapConfig(w http.ResponseWriter, r *http.Request) {
 	trap, ok := h.trapForDownload(w, r)
 	if !ok {
@@ -111,7 +120,7 @@ func (h *Handlers) TrapConfig(w http.ResponseWriter, r *http.Request) {
 	_ = enc.Encode(cfg)
 }
 
-// TrapBundle serves a zip with config.json and run instructions.
+// Отправляет zip архив с конфигурацией ловушки и инструкциями запуска
 func (h *Handlers) TrapBundle(w http.ResponseWriter, r *http.Request) {
 	trap, ok := h.trapForDownload(w, r)
 	if !ok {
@@ -126,7 +135,7 @@ func (h *Handlers) TrapBundle(w http.ResponseWriter, r *http.Request) {
 		_, _ = f.Write(cfgBytes)
 	}
 	if f, err := zw.Create("RUN.txt"); err == nil {
-		_, _ = f.Write([]byte(runInstructions(trap, cfg)))
+		_, _ = f.Write([]byte(generateRunInstructions(trap, cfg)))
 	}
 	if err := zw.Close(); err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to build bundle")
@@ -139,7 +148,8 @@ func (h *Handlers) TrapBundle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(buf.Bytes())
 }
 
-func runInstructions(t *models.Trap, cfg agentConfig) string {
+// Возвращает строку с инструкциями по запуску
+func generateRunInstructions(t *models.Trap, cfg agentConfig) string {
 	where := fmt.Sprintf("%s:%d", t.Bind, t.Port)
 	if t.Ports != "" {
 		where = fmt.Sprintf("%s ports %s", t.Bind, t.Ports)
