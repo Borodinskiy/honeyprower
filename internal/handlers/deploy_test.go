@@ -21,10 +21,11 @@ import (
 )
 
 type mockDeployer struct {
-	deployFunc  func(ctx context.Context, target deploy.TargetConfig, payload deploy.Payload) error
-	lastTarget  deploy.TargetConfig
-	lastPayload deploy.Payload
-	calls       int
+	deployFunc   func(ctx context.Context, target deploy.TargetConfig, payload deploy.Payload) error
+	undeployFunc func(ctx context.Context, target deploy.TargetConfig) error
+	lastTarget   deploy.TargetConfig
+	lastPayload  deploy.Payload
+	calls        int
 }
 
 func (m *mockDeployer) Deploy(ctx context.Context, target deploy.TargetConfig, payload deploy.Payload) error {
@@ -33,6 +34,15 @@ func (m *mockDeployer) Deploy(ctx context.Context, target deploy.TargetConfig, p
 	m.lastPayload = payload
 	if m.deployFunc != nil {
 		return m.deployFunc(ctx, target, payload)
+	}
+	return nil
+}
+
+func (m *mockDeployer) Undeploy(ctx context.Context, target deploy.TargetConfig) error {
+	m.calls++
+	m.lastTarget = target
+	if m.undeployFunc != nil {
+		return m.undeployFunc(ctx, target)
 	}
 	return nil
 }
@@ -383,5 +393,66 @@ func TestDeployTrap_DefaultPortAndPrivateKey(t *testing.T) {
 	}
 	if !strings.Contains(mock.lastTarget.PrivateKey, "OPENSSH PRIVATE KEY") {
 		t.Errorf("expected private key to be set, got %q", mock.lastTarget.PrivateKey)
+	}
+}
+
+func undeployRequest(t *testing.T, id string, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/traps/"+id+"/undeploy", strings.NewReader(body))
+	req.SetPathValue("id", id)
+	return req
+}
+
+func TestUndeployTrap_Success(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+	id := strconv.FormatInt(trap.ID, 10)
+
+	w := httptest.NewRecorder()
+	h.HandleUndeployTrap(w, undeployRequest(t, id, `{"host":"10.0.0.5","username":"admin","password":"pw","useSudo":true}`))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.calls != 1 || mock.lastTarget.Host != "10.0.0.5" || mock.lastTarget.Port != 22 || !mock.lastTarget.UseSudo {
+		t.Errorf("unexpected target passed to deployer: %+v (calls %d)", mock.lastTarget, mock.calls)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"removed"`) {
+		t.Errorf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestUndeployTrap_Errors(t *testing.T) {
+	h, _, mock, trap := setupDeployTest(t)
+	id := strconv.FormatInt(trap.ID, 10)
+
+	cases := []struct {
+		name, id, body string
+		code           int
+		want           string
+	}{
+		{"unknown trap", "9999", `{"host":"h","username":"u","password":"p"}`, http.StatusNotFound, "trap not found"},
+		{"no host", id, `{"username":"u","password":"p"}`, http.StatusBadRequest, "host is required"},
+		{"no credentials", id, `{"host":"h","username":"u"}`, http.StatusBadRequest, "password or privateKey is required"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			h.HandleUndeployTrap(w, undeployRequest(t, c.id, c.body))
+			if w.Code != c.code || !strings.Contains(w.Body.String(), c.want) {
+				t.Errorf("got %d %s, want %d %q", w.Code, w.Body.String(), c.code, c.want)
+			}
+		})
+	}
+	if mock.calls != 0 {
+		t.Errorf("deployer must not be called on invalid input, got %d calls", mock.calls)
+	}
+
+	mock.undeployFunc = func(ctx context.Context, target deploy.TargetConfig) error {
+		return errors.New("failed to remove honeyforge-agent: Permission denied")
+	}
+	w := httptest.NewRecorder()
+	h.HandleUndeployTrap(w, undeployRequest(t, id, `{"host":"h","username":"u","password":"p"}`))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Permission denied") {
+		t.Errorf("got %d %s, want 500 with deployer error", w.Code, w.Body.String())
 	}
 }

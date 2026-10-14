@@ -44,29 +44,8 @@ func (h *Handlers) HandleDeployTrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var target deploy.TargetConfig
-	if !httpx.DecodeJSON(w, r, &target) {
-		return
-	}
-
-	if strings.TrimSpace(target.Host) == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "host is required")
-		return
-	}
-	if strings.TrimSpace(target.Username) == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "username is required")
-		return
-	}
-	if target.Password == "" && target.PrivateKey == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "password or privateKey is required")
-		return
-	}
-	if target.Port <= 0 {
-		target.Port = 22
-	}
-
-	if h.Deployer == nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "deployer service unavailable")
+	target, ok := h.decodeTarget(w, r)
+	if !ok {
 		return
 	}
 
@@ -133,6 +112,74 @@ func (h *Handlers) HandleDeployTrap(w http.ResponseWriter, r *http.Request) {
 		TrapID: id,
 		Host:   target.Host,
 	})
+}
+
+// HandleUndeployTrap handles POST /api/traps/{id}/undeploy: stops the agent on the
+// target over SSH and removes its files. The channel to the agent is one-way, so
+// the center can't stop it any other way.
+func (h *Handlers) HandleUndeployTrap(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := h.Store.GetTrap(r.Context(), id); errors.Is(err, storage.ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "trap not found")
+		return
+	} else if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap")
+		return
+	}
+
+	target, ok := h.decodeTarget(w, r)
+	if !ok {
+		return
+	}
+
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(deployTimeout + 10*time.Second))
+	ctx, cancel := context.WithTimeout(r.Context(), deployTimeout)
+	defer cancel()
+
+	if err := h.Deployer.Undeploy(ctx, target); err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, deployResponse{
+		Status: "removed",
+		TrapID: id,
+		Host:   target.Host,
+	})
+}
+
+// decodeTarget reads and checks SSH connection settings; on failure the error is already written.
+func (h *Handlers) decodeTarget(w http.ResponseWriter, r *http.Request) (deploy.TargetConfig, bool) {
+	var target deploy.TargetConfig
+	if !httpx.DecodeJSON(w, r, &target) {
+		return target, false
+	}
+
+	if strings.TrimSpace(target.Host) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "host is required")
+		return target, false
+	}
+	if strings.TrimSpace(target.Username) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "username is required")
+		return target, false
+	}
+	if target.Password == "" && target.PrivateKey == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "password or privateKey is required")
+		return target, false
+	}
+	if target.Port <= 0 {
+		target.Port = 22
+	}
+
+	if h.Deployer == nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "deployer service unavailable")
+		return target, false
+	}
+	return target, true
 }
 
 func hostOf(rawURL string) string {

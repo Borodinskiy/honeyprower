@@ -50,7 +50,9 @@ type Payload struct {
 	ConfigJSON     []byte `json:"configJson,omitempty"`
 }
 
-// Deployer abstracts remote agent installation.
+// Deployer abstracts remote agent installation and removal.
 type Deployer interface {
 	Deploy(ctx context.Context, target TargetConfig, payload Payload) error
+	// Undeploy stops the agent and removes its files from the target.
+	Undeploy(ctx context.Context, target TargetConfig) error
 }

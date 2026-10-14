@@ -19,6 +19,7 @@ const CONFIG = {
     LEGACY_TOKEN_KEY: 'auth_token', // старые версии хранили токен здесь — подчищаем
     LANG_KEY: 'app_lang',
     THEME_KEY: 'app_theme',
+    DEPLOY_TARGET_KEY: 'deploy_target_', // + id ловушки: куда её развернули (без паролей), чтобы потом снять
     REQUEST_TIMEOUT: 10000,
     POLL_INTERVAL: 10000 // автообновление дашборда, мс
 };
@@ -172,6 +173,14 @@ const api = {
             return { status: 'deployed', trapId: Number(id), host: target.host };
         }
         return this._request(`/traps/${id}/deploy`, { method: 'POST', body: target, timeout: 240000 });
+    },
+
+    async undeployTrap(id, target) {
+        if (CONFIG.USE_MOCK_DATA) {
+            await new Promise(r => setTimeout(r, 800));
+            return { status: 'removed', trapId: Number(id), host: target.host };
+        }
+        return this._request(`/traps/${id}/undeploy`, { method: 'POST', body: target, timeout: 240000 });
     },
 
     async getTrapEvents(id, type = '') {
@@ -396,6 +405,14 @@ const I18N_DICT = {
     "Ловушка успешно развернута на": "Trap successfully deployed on",
     "Служба honeyforge-agent запущена.": "honeyforge-agent service is running.",
     "Ошибка развертывания": "Deployment error",
+    "Снять с сервера": "Remove from server",
+    "Снятие ловушки": "Remove trap",
+    "Остановка службы honeyforge-agent и удаление агента, его конфига и unit-файла с сервера.": "Stops the honeyforge-agent service and removes the agent, its config and unit file from the server.",
+    "Остановить и удалить": "Stop and remove",
+    "Подключение к серверу и остановка агента...": "Connecting to server and stopping agent...",
+    "Ловушка снята с сервера": "Trap removed from server",
+    "Служба остановлена, файлы агента удалены.": "Service stopped, agent files removed.",
+    "Ошибка снятия ловушки": "Trap removal error",
     "Укажите хост сервера": "Specify server host",
     "Укажите имя пользователя SSH": "Specify SSH username",
     "Введите пароль SSH": "Enter SSH password",
@@ -538,10 +555,11 @@ function updateTrapActions() {
     const eventsBtn = document.getElementById('open-events-trap-btn');
     const editBtn = document.getElementById('open-edit-trap-btn');
     const deployBtn = document.getElementById('open-deploy-trap-btn');
+    const undeployBtn = document.getElementById('open-undeploy-trap-btn');
     const deleteBtn = document.getElementById('delete-trap-btn');
 
     // Кнопки действий показываем только при выбранной ловушке — без выбора они лишь мешают.
-    for (const btn of [eventsBtn, editBtn, deployBtn, deleteBtn]) {
+    for (const btn of [eventsBtn, editBtn, deployBtn, undeployBtn, deleteBtn]) {
         if (!btn) continue;
         btn.disabled = !hasSelection;
         btn.hidden = !hasSelection;
@@ -1169,15 +1187,40 @@ function showCreatedModal(trap) {
     openModal('trap-created-modal');
 }
 
-// Открывает окно развертывания ловушки по SSH
-function openDeployTrapModal(trapId) {
+// Куда ловушку развернули в последний раз (хост, порт, логин, способ входа — без паролей).
+function loadDeployTarget(trapId) {
+    try {
+        return JSON.parse(localStorage.getItem(CONFIG.DEPLOY_TARGET_KEY + trapId)) || {};
+    } catch (e) {
+        return {};
+    }
+}
+
+function saveDeployTarget(trapId, target) {
+    try {
+        localStorage.setItem(CONFIG.DEPLOY_TARGET_KEY + trapId, JSON.stringify(target));
+    } catch (e) { /* localStorage может быть выключен */ }
+}
+
+// Открывает окно SSH: mode 'deploy' — развернуть ловушку, 'undeploy' — снять её с сервера
+function openDeployTrapModal(trapId, mode = 'deploy') {
     const trap = state.traps.find(t => t.id === Number(trapId));
     if (!trap) return;
 
+    const undeploy = mode === 'undeploy';
     state.deployingTrapId = trap.id;
+    state.deployMode = mode;
+    const saved = loadDeployTarget(trap.id);
+
     const modalTitle = document.getElementById('deploy-modal-title');
     if (modalTitle) {
-        modalTitle.textContent = `${t('Развертывание ловушки')} «${trap.name}»`;
+        modalTitle.textContent = `${t(undeploy ? 'Снятие ловушки' : 'Развертывание ловушки')} «${trap.name}»`;
+    }
+    const subtitle = document.getElementById('deploy-trap-subtitle');
+    if (subtitle) {
+        subtitle.textContent = t(undeploy
+            ? 'Остановка службы honeyforge-agent и удаление агента, его конфига и unit-файла с сервера.'
+            : 'Автоматическая установка агента, настройка службы systemd и запуск ловушки на удаленном Linux-сервере.');
     }
 
     const trapIdInput = document.getElementById('deploy-trap-id');
@@ -1185,34 +1228,35 @@ function openDeployTrapModal(trapId) {
 
     // Сброс значений полей формы
     const hostInput = document.getElementById('deploy-host');
-    if (hostInput) hostInput.value = '';
+    if (hostInput) hostInput.value = saved.host || '';
 
     const portInput = document.getElementById('deploy-port');
-    if (portInput) portInput.value = '22';
+    if (portInput) portInput.value = String(saved.port || 22);
 
     const usernameInput = document.getElementById('deploy-username');
-    if (usernameInput) usernameInput.value = 'root';
+    if (usernameInput) usernameInput.value = saved.username || 'root';
 
-    const passwordRadio = document.getElementById('deploy-auth-password-radio');
-    if (passwordRadio) passwordRadio.checked = true;
+    const useKey = saved.authType === 'key';
+    const authRadio = document.getElementById(useKey ? 'deploy-auth-key-radio' : 'deploy-auth-password-radio');
+    if (authRadio) authRadio.checked = true;
 
     const passwordGroup = document.getElementById('deploy-password-group');
-    if (passwordGroup) passwordGroup.style.display = '';
+    if (passwordGroup) passwordGroup.style.display = useKey ? 'none' : '';
 
     const passwordInput = document.getElementById('deploy-password');
     if (passwordInput) passwordInput.value = '';
 
     const keyGroup = document.getElementById('deploy-key-group');
-    if (keyGroup) keyGroup.style.display = 'none';
+    if (keyGroup) keyGroup.style.display = useKey ? '' : 'none';
 
     const keyInput = document.getElementById('deploy-key');
     if (keyInput) keyInput.value = '';
 
     const sudoCheckbox = document.getElementById('deploy-use-sudo');
-    if (sudoCheckbox) sudoCheckbox.checked = false;
+    if (sudoCheckbox) sudoCheckbox.checked = !!saved.useSudo;
 
     const rootPassGroup = document.getElementById('deploy-root-password-group');
-    if (rootPassGroup) rootPassGroup.style.display = 'none';
+    if (rootPassGroup) rootPassGroup.style.display = saved.useSudo ? '' : 'none';
 
     const rootPassInput = document.getElementById('deploy-root-password');
     if (rootPassInput) rootPassInput.value = '';
@@ -1223,7 +1267,8 @@ function openDeployTrapModal(trapId) {
     const submitBtn = document.getElementById('deploy-submit-btn');
     if (submitBtn) {
         submitBtn.disabled = false;
-        submitBtn.textContent = t('Развернуть ловушку');
+        submitBtn.textContent = t(undeploy ? 'Остановить и удалить' : 'Развернуть ловушку');
+        submitBtn.className = undeploy ? 'btn btn-danger' : 'btn btn-success';
         submitBtn.onclick = null;
     }
 
@@ -1663,6 +1708,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
+    const undeployBtn = document.getElementById('open-undeploy-trap-btn');
+    if (undeployBtn) {
+        undeployBtn.addEventListener('click', () => {
+            if (state.selectedTrapId === null) return;
+            openDeployTrapModal(state.selectedTrapId, 'undeploy');
+        });
+    }
+
     const createdDeployBtn = document.getElementById('created-deploy-btn');
     if (createdDeployBtn) {
         createdDeployBtn.addEventListener('click', () => {
@@ -1821,7 +1874,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             statusBox.style.display = 'flex';
             statusBox.className = 'deploy-status-box deploy-status-loading';
             spinner.style.display = 'block';
-            statusText.textContent = t('Подключение к серверу и установка агента...');
+            const undeploy = state.deployMode === 'undeploy';
+            statusText.textContent = t(undeploy ? 'Подключение к серверу и остановка агента...' : 'Подключение к серверу и установка агента...');
             submitBtn.disabled = true;
 
             const payload = {
@@ -1835,12 +1889,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             };
 
             try {
-                const res = await api.deployTrap(trapId, payload);
+                const res = undeploy ? await api.undeployTrap(trapId, payload) : await api.deployTrap(trapId, payload);
+                saveDeployTarget(trapId, { host, port, username, authType, useSudo });
                 statusBox.className = 'deploy-status-box deploy-status-success';
                 spinner.style.display = 'none';
-                statusText.textContent = `${t('Ловушка успешно развернута на')} ${res.host || host}! ${t('Служба honeyforge-agent запущена.')}`;
+                statusText.textContent = undeploy
+                    ? `${t('Ловушка снята с сервера')} ${res.host || host}. ${t('Служба остановлена, файлы агента удалены.')}`
+                    : `${t('Ловушка успешно развернута на')} ${res.host || host}! ${t('Служба honeyforge-agent запущена.')}`;
                 submitBtn.disabled = false;
                 submitBtn.textContent = t('Закрыть');
+                submitBtn.className = 'btn btn-secondary';
                 submitBtn.onclick = (ev) => {
                     ev.preventDefault();
                     closeModal('deploy-trap-modal');
@@ -1852,7 +1910,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (err) {
                 statusBox.className = 'deploy-status-box deploy-status-error';
                 spinner.style.display = 'none';
-                statusText.textContent = `${t('Ошибка развертывания')}: ${getErrorMessage(err, 'Ошибка развертывания')}`;
+                const errKey = undeploy ? 'Ошибка снятия ловушки' : 'Ошибка развертывания';
+                statusText.textContent = `${t(errKey)}: ${getErrorMessage(err, errKey)}`;
                 submitBtn.disabled = false;
             }
         });

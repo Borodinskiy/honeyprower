@@ -52,68 +52,11 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 		return fmt.Errorf("binary file %q is empty", payload.BinaryPath)
 	}
 
-	// 2. Validate target configuration
-	if target.Host == "" {
-		return errors.New("target host is required")
-	}
-	if target.Username == "" {
-		return errors.New("target username is required")
-	}
-
-	port := target.Port
-	if port <= 0 {
-		port = 22
-	}
-
-	var authMethods []ssh.AuthMethod
-	if target.PrivateKey != "" {
-		signer, err := ssh.ParsePrivateKey([]byte(target.PrivateKey))
-		if err != nil {
-			return fmt.Errorf("failed to parse private key: %w", err)
-		}
-		authMethods = append(authMethods, ssh.PublicKeys(signer))
-	}
-	if target.Password != "" {
-		authMethods = append(authMethods, ssh.Password(target.Password))
-	}
-	if len(authMethods) == 0 {
-		return errors.New("no authentication method provided: password or private key required")
-	}
-
-	// 3. Establish SSH connection
-	clientConfig := &ssh.ClientConfig{
-		User:            target.Username,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         d.Timeout,
-	}
-
-	addr := fmt.Sprintf("%s:%d", target.Host, port)
-	dialer := net.Dialer{Timeout: d.Timeout}
-	netConn, err := dialer.DialContext(ctx, "tcp", addr)
+	client, closeConn, err := d.connect(ctx, target)
 	if err != nil {
-		return fmt.Errorf("failed to connect to %s: %w", addr, err)
+		return err
 	}
-	defer netConn.Close()
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, clientConfig)
-	if err != nil {
-		return fmt.Errorf("ssh handshake failed with %s: %w", addr, err)
-	}
-	client := ssh.NewClient(sshConn, chans, reqs)
-	defer client.Close()
-
-	// Terminate client connection early if context is cancelled
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-			_ = netConn.Close()
-		case <-done:
-		}
-	}()
+	defer closeConn()
 
 	// 4. Deliver files and move them to destination locations
 	// Step 4.1: Agent binary
@@ -173,12 +116,103 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 	return nil
 }
 
+// Undeploy stops the agent service on the remote server and removes everything Deploy installed.
+func (d *SSHDeployer) Undeploy(ctx context.Context, target TargetConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	client, closeConn, err := d.connect(ctx, target)
+	if err != nil {
+		return err
+	}
+	defer closeConn()
+
+	if err := d.runCommand(client, target, removeCmd); err != nil {
+		return fmt.Errorf("failed to remove honeyforge-agent: %w", err)
+	}
+	return nil
+}
+
+// removeCmd tolerates an absent service (already removed), but not a failed rm (no rights).
+const removeCmd = "systemctl disable --now honeyforge-agent.service >/dev/null 2>&1; " +
+	"rm -f /etc/systemd/system/honeyforge-agent.service /usr/local/bin/honeyforge-agent && " +
+	"rm -rf /etc/honeyforge && systemctl daemon-reload"
+
 // activateCmd resets SELinux labels first: files moved from /tmp keep user_tmp_t and systemd refuses to exec them (203/EXEC).
 const activateCmd = "if command -v restorecon >/dev/null 2>&1; then restorecon -F /usr/local/bin/honeyforge-agent /etc/honeyforge/config.json /etc/systemd/system/honeyforge-agent.service; fi; " +
 	"systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service"
 
 // verifyCmd waits for the agent to settle and prints its journal tail to stderr when it is not active.
 const verifyCmd = "sleep 3; systemctl is-active --quiet honeyforge-agent.service || { journalctl -u honeyforge-agent.service -n 15 --no-pager >&2; exit 1; }"
+
+// connect validates the target and opens an SSH client; closeConn releases it.
+func (d *SSHDeployer) connect(ctx context.Context, target TargetConfig) (*ssh.Client, func(), error) {
+	if target.Host == "" {
+		return nil, nil, errors.New("target host is required")
+	}
+	if target.Username == "" {
+		return nil, nil, errors.New("target username is required")
+	}
+
+	port := target.Port
+	if port <= 0 {
+		port = 22
+	}
+
+	var authMethods []ssh.AuthMethod
+	if target.PrivateKey != "" {
+		signer, err := ssh.ParsePrivateKey([]byte(target.PrivateKey))
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse private key: %w", err)
+		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+	}
+	if target.Password != "" {
+		authMethods = append(authMethods, ssh.Password(target.Password))
+	}
+	if len(authMethods) == 0 {
+		return nil, nil, errors.New("no authentication method provided: password or private key required")
+	}
+
+	// Establish SSH connection
+	clientConfig := &ssh.ClientConfig{
+		User:            target.Username,
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         d.Timeout,
+	}
+
+	addr := fmt.Sprintf("%s:%d", target.Host, port)
+	dialer := net.Dialer{Timeout: d.Timeout}
+	netConn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+
+	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, clientConfig)
+	if err != nil {
+		_ = netConn.Close()
+		return nil, nil, fmt.Errorf("ssh handshake failed with %s: %w", addr, err)
+	}
+	client := ssh.NewClient(sshConn, chans, reqs)
+
+	// Terminate client connection early if context is cancelled
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+			_ = netConn.Close()
+		case <-done:
+		}
+	}()
+	closeConn := func() {
+		close(done)
+		_ = client.Close()
+		_ = netConn.Close()
+	}
+	return client, closeConn, nil
+}
 
 func (d *SSHDeployer) uploadFile(client *ssh.Client, remotePath string, content []byte) error {
 	session, err := client.NewSession()

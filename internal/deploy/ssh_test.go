@@ -770,3 +770,73 @@ func TestTargetConfig_UnmarshalJSON(t *testing.T) {
 		t.Error("expected error for invalid json, got nil")
 	}
 }
+
+func TestUndeploy_SudoSuccess(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["deployuser"] = "userpass"
+
+	deployer := NewSSHDeployer()
+	deployer.Timeout = 5 * time.Second
+
+	target := TargetConfig{
+		Host:     "127.0.0.1",
+		Port:     server.port,
+		Username: "deployuser",
+		Password: "userpass",
+		UseSudo:  true,
+	}
+	if err := deployer.Undeploy(context.Background(), target); err != nil {
+		t.Fatalf("Undeploy failed: %v", err)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.commands) != 1 {
+		t.Fatalf("expected 1 command, got %d: %v", len(server.commands), server.commands)
+	}
+	cmd := server.commands[0]
+	if !strings.HasPrefix(cmd, "sudo -S -p ''") || !strings.Contains(cmd, "systemctl disable --now honeyforge-agent.service") {
+		t.Errorf("unexpected command: %q", cmd)
+	}
+	if len(server.sudoPasswords) != 1 || server.sudoPasswords[0] != "userpass" {
+		t.Errorf("sudo password not passed: %v", server.sudoPasswords)
+	}
+}
+
+func TestUndeploy_Errors(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "rootpass"
+
+	deployer := NewSSHDeployer()
+	deployer.Timeout = 2 * time.Second
+
+	t.Run("missing host", func(t *testing.T) {
+		err := deployer.Undeploy(context.Background(), TargetConfig{Username: "root", Password: "rootpass"})
+		if err == nil || !strings.Contains(err.Error(), "host is required") {
+			t.Errorf("expected host error, got %v", err)
+		}
+	})
+
+	t.Run("wrong password", func(t *testing.T) {
+		err := deployer.Undeploy(context.Background(), TargetConfig{Host: "127.0.0.1", Port: server.port, Username: "root", Password: "nope"})
+		if err == nil || !strings.Contains(err.Error(), "handshake failed") {
+			t.Errorf("expected handshake error, got %v", err)
+		}
+	})
+
+	t.Run("rm failure reported", func(t *testing.T) {
+		server.mu.Lock()
+		server.failCommands["rm -f /etc/systemd/system/honeyforge-agent.service"] = "rm: cannot remove: Permission denied"
+		server.mu.Unlock()
+		defer func() {
+			server.mu.Lock()
+			delete(server.failCommands, "rm -f /etc/systemd/system/honeyforge-agent.service")
+			server.mu.Unlock()
+		}()
+
+		err := deployer.Undeploy(context.Background(), TargetConfig{Host: "127.0.0.1", Port: server.port, Username: "root", Password: "rootpass"})
+		if err == nil || !strings.Contains(err.Error(), "Permission denied") {
+			t.Errorf("expected rm error, got %v", err)
+		}
+	})
+}

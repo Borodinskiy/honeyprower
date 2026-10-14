@@ -44,6 +44,7 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	mux.Handle("GET /api/traps/{id}/config", requireAuth(http.HandlerFunc(handlers.TrapConfig)))
 	mux.Handle("GET /api/traps/{id}/bundle", requireAuth(http.HandlerFunc(handlers.TrapBundle)))
 	mux.Handle("POST /api/traps/{id}/deploy", requireAuth(http.HandlerFunc(handlers.HandleDeployTrap)))
+	mux.Handle("POST /api/traps/{id}/undeploy", requireAuth(http.HandlerFunc(handlers.HandleUndeployTrap)))
 
 	mux.Handle("GET /api/events", requireAuth(http.HandlerFunc(handlers.ListFilterEvents)))
 	mux.Handle("GET /api/stats", requireAuth(http.HandlerFunc(handlers.GetStats)))
