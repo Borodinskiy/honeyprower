@@ -198,6 +198,41 @@ var schemas = map[string][]Field{
 		integer("max_replies_per_ip_min", "Макс. ответов одному IP в минуту", 20, "", 1, 10000).adv(),
 		pDelay,
 	},
+	"iec104": {
+		boolean("breaker_closed", "Выключатель Q0 (замкнут)", true, "Состояние главного выключателя подстанции (True = замкнут / включен)."),
+		boolean("switch_closed", "Разъединитель Q1 (замкнут)", true, "Состояние линейного разъединителя (True = замкнут / включен)."),
+		number("voltage", "Напряжение шины, кВ", 220.5, "Телеизмерение напряжения подстанции (тип 13, M_ME_NC_1).", 0, 1000),
+		number("power", "Активная мощность, МВт", 45.2, "Телеизмерение активной мощности (тип 13, M_ME_NC_1).", 0, 10000),
+		number("frequency", "Частота сети, Гц", 50.0, "Телеизмерение частоты энергосистемы.", 40, 70),
+		pHost, pIdle, pBytes, pConns, pDelay,
+	},
+	"scada": {
+		str("vendor_name", "Производитель (VendorName)", "Schneider Electric", "MEI Read Device Identification (0x2B / 0x0E): имя производителя."),
+		str("product_code", "Модель (ProductCode)", "Modicon M580", "Код модели ПЛК/контроллера."),
+		str("revision", "Версия прошивки (RevisionNumber)", "v4.10", "Номер ревизии/прошивки устройства."),
+		pHost, pIdle, pBytes, pConns, pDelay,
+	},
+	"high_interaction": {
+		str("hostname", "Имя хоста", "substation-gw01", "Имя хоста в prompt оболочки Linux."),
+		str("user", "Пользователь", "root", "Пользователь по умолчанию при входе в сессию."),
+		text("banner", "Баннер системы", "Linux substation-gw01 5.15.0-88-generic #98-Ubuntu SMP Mon Oct 2 15:18:56 UTC 2023 x86_64\r\n\r\n", "Приветственный баннер при подключении к SSH/оболочке."),
+		pIdle, pBytes, pConns,
+	},
+	"low_extra": {
+		enum("mode", "Режим зонда", "auto", "Автоопределение по порту/содержимому или фиксированный эмулятор.",
+			opt("auto", "Авто (по порту и содержимому)"), opt("ssdp", "SSDP / UPnP (M-SEARCH)"), opt("daytime", "Daytime (RFC 867)"),
+			opt("echo", "Echo (RFC 862)"), opt("chargen", "Chargen (RFC 864)"), opt("generic", "Общий TCP-зонд")),
+		str("device_location", "URL описания SSDP (LOCATION)", "http://127.0.0.1:1900/rootDesc.xml", "URL XML-дескриптора устройства UPnP. Поддерживает подстановку {ip}.").when("mode", "auto", "ssdp"),
+		str("device_usn", "USN устройства UPnP", "uuid:honeyforge-upnp-device-01", "Уникальный идентификатор службы UPnP.").when("mode", "auto", "ssdp"),
+		str("server_header", "Заголовок Server SSDP", "Linux/4.14 UPnP/1.0", "Строка идентификации сервера в ответе SSDP.").when("mode", "auto", "ssdp"),
+		pIdle, pConns, pDelay,
+	},
+	"medium_extra": {
+		enum("mode", "Режим эмуляции", "auto", "Автоопределение по порту (1883 -> MQTT, 6379 -> Redis) или принудительный выбор.",
+			opt("auto", "Авто (по порту подключения)"), opt("redis", "Redis Wire Protocol"), opt("mqtt", "MQTT Telemetry Broker")),
+		str("redis_version", "Версия Redis", "7.0.12", "Версия Redis сервера, возвращаемая по команде INFO.").when("mode", "auto", "redis"),
+		pIdle, pBytes, pConns, pDelay,
+	},
 }
 
 // Schema returns the parameter description of a class (nil for unknown).

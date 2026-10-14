@@ -558,6 +558,34 @@ function classTitle(classId) {
     return c ? c.title : classId;
 }
 
+function getLevelBadge(classId) {
+    const c = (state.classes || []).find(c => c.id === classId);
+    let level = c ? c.level : '';
+    let badgeClass = 'badge-low';
+    if (!level) {
+        if (['dialog', 'http', 'honeytoken', 'medium_extra'].includes(classId)) {
+            level = 'Medium';
+        } else if (classId === 'high_interaction') {
+            level = 'High';
+        } else if (['iec104', 'scada'].includes(classId)) {
+            level = 'ICS/SCADA';
+        } else {
+            level = 'Low';
+        }
+    }
+    const text = level;
+    if (level === 'Medium') {
+        badgeClass = 'badge-med';
+    } else if (level === 'High') {
+        badgeClass = 'badge-high';
+    } else if (level === 'ICS/SCADA' || level === 'ICS') {
+        badgeClass = 'badge-ics';
+    } else {
+        badgeClass = 'badge-low';
+    }
+    return `<span class="badge ${badgeClass}">${escapeHtml(text)}</span>`;
+}
+
 // собирает структуру для карточки с ловушкой
 function buildTrapCard(trap) {
     const status = trap.enabled ? (trap.status || 'never') : 'disabled';
@@ -572,7 +600,10 @@ function buildTrapCard(trap) {
                 <span class="trap-name" title="${escapeHtml(trap.name)}">${escapeHtml(trap.name)}</span>
                 <span class="trap-status" style="color: ${statusColor};">${statusText}</span>
             </div>
-            <div class="trap-info trap-class">${escapeHtml(classTitle(trap.class))}</div>
+            <div class="trap-info trap-class" style="display: flex; align-items: center; gap: 8px;">
+                ${getLevelBadge(trap.class)}
+                <span>${escapeHtml(classTitle(trap.class))}</span>
+            </div>
             <div class="trap-info">${t('Адрес')}: ${escapeHtml(trapAddress(trap))}</div>
             <div class="trap-info"><span>${t('Предупреждений')}</span>: ${escapeHtml(trap.warnings ?? 0)} · <span>${t('Событий')}</span>: ${escapeHtml(trap.totalEvents ?? 0)}</div>
         </div>
@@ -1057,18 +1088,42 @@ function populateClassSelect(selectedClass) {
     const sel = document.getElementById('trap-class');
     if (!sel) return;
     sel.innerHTML = state.classes.map(c =>
-        `<option value="${c.id}">${escapeHtml(c.title)}</option>`).join('');
+        `<option value="${c.id}">[${escapeHtml(c.level || 'Low')}] ${escapeHtml(c.title)}</option>`).join('');
     if (selectedClass) sel.value = selectedClass;
+    const badgeEl = document.getElementById('trap-class-badge');
+    if (badgeEl) badgeEl.innerHTML = getLevelBadge(sel.value);
 }
 
 // Шаблоны, подходящие выбранному классу.
 function populatePresetSelect(classId) {
     const sel = document.getElementById('trap-preset');
     if (!sel) return;
-    const list = state.presets.filter(p => p.class === classId);
-    sel.innerHTML = `<option value="">— Без шаблона —</option>` +
-        list.map(p => `<option value="${escapeHtml(p.presetId)}">${escapeHtml(p.name)}</option>`).join('');
+    const matching = state.presets.filter(p => p.class === classId);
+    const others = state.presets.filter(p => p.class !== classId);
+
+    let html = `<option value="">— Без шаблона —</option>`;
+    if (matching.length > 0) {
+        html += `<optgroup label="Шаблоны для этого класса">` +
+            matching.map(p => {
+                const c = state.classes.find(cls => cls.id === p.class);
+                const lvl = (c && c.level) || p.level || '';
+                const tag = lvl ? `[${lvl}] ` : '';
+                return `<option value="${escapeHtml(p.presetId)}">${tag}${escapeHtml(p.name)}</option>`;
+            }).join('') + `</optgroup>`;
+    }
+    if (others.length > 0) {
+        html += `<optgroup label="Шаблоны других классов">` +
+            others.map(p => {
+                const c = state.classes.find(cls => cls.id === p.class);
+                const lvl = (c && c.level) || p.level || '';
+                const tag = lvl ? `[${lvl}] ` : '';
+                return `<option value="${escapeHtml(p.presetId)}">${tag}${escapeHtml(p.name)} (${escapeHtml((c && c.title) || p.class)})</option>`;
+            }).join('') + `</optgroup>`;
+    }
+    sel.innerHTML = html;
     sel.value = '';
+    const badgeEl = document.getElementById('trap-preset-badge');
+    if (badgeEl) badgeEl.innerHTML = '';
 }
 
 // Класс многопортовый? (port_listener). Переключает поля порт/порты.
@@ -1086,8 +1141,12 @@ function togglePortFields(classId) {
 function applyClassDefaults(classId) {
     paramForm.classId = classId;
     const c = currentClass();
+    const badgeEl = document.getElementById('trap-class-badge');
+    if (badgeEl) badgeEl.innerHTML = getLevelBadge(classId);
     const help = document.getElementById('trap-class-help');
-    if (help) help.textContent = c ? c.description : '';
+    if (help) {
+        help.innerHTML = `${getLevelBadge(classId)} <span style="margin-left: 6px;">${escapeHtml(c ? c.description : '')}</span>`;
+    }
 
     togglePortFields(classId);
     if (c && c.defaultPort) document.getElementById('trap-port').value = c.defaultPort;
@@ -1101,12 +1160,35 @@ function applyClassDefaults(classId) {
 
 function applyPreset(presetId) {
     const p = state.presets.find(p => p.presetId === presetId);
-    if (!p) return;
+    const badgeEl = document.getElementById('trap-preset-badge');
+    if (!p) {
+        if (badgeEl) badgeEl.innerHTML = '';
+        return;
+    }
+    if (badgeEl) badgeEl.innerHTML = getLevelBadge(p.class);
+    if (p.class && p.class !== paramForm.classId) {
+        const classSel = document.getElementById('trap-class');
+        if (classSel && !classSel.disabled) {
+            classSel.value = p.class;
+            paramForm.classId = p.class;
+            const c = currentClass();
+            const classBadgeEl = document.getElementById('trap-class-badge');
+            if (classBadgeEl) classBadgeEl.innerHTML = getLevelBadge(p.class);
+            const help = document.getElementById('trap-class-help');
+            if (help) {
+                help.innerHTML = `${getLevelBadge(p.class)} <span style="margin-left: 6px;">${escapeHtml(c ? c.description : '')}</span>`;
+            }
+            togglePortFields(p.class);
+            populatePresetSelect(p.class);
+            document.getElementById('trap-preset').value = presetId;
+        }
+    }
     if (p.port) document.getElementById('trap-port').value = p.port;
     if (p.ports) document.getElementById('trap-ports').value = p.ports;
     paramForm.params = fillDefaults((currentClass() || {}).fields, parseParams(p.params));
-    if (!document.getElementById('trap-name').value.trim()) {
-        document.getElementById('trap-name').value = p.name;
+    const nameInput = document.getElementById('trap-name');
+    if (!nameInput.value.trim() || state.presets.some(pr => pr.name === nameInput.value.trim())) {
+        nameInput.value = p.name;
     }
     resetParamsView();
 }
@@ -1131,8 +1213,12 @@ function openTrapModal(mode, trapId = null) {
 
         paramForm.classId = trap.class;
         const c = currentClass();
+        const badgeEl = document.getElementById('trap-class-badge');
+        if (badgeEl) badgeEl.innerHTML = getLevelBadge(trap.class);
         const help = document.getElementById('trap-class-help');
-        if (help) help.textContent = c ? c.description : '';
+        if (help) {
+            help.innerHTML = `${getLevelBadge(trap.class)} <span style="margin-left: 6px;">${escapeHtml(c ? c.description : '')}</span>`;
+        }
         togglePortFields(trap.class);
 
         document.getElementById('trap-name').value  = trap.name || '';
