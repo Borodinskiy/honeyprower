@@ -28,6 +28,11 @@ pub enum Trap {
     Tarpit(Arc<tarpit::Tarpit>),
     Honeytoken(Arc<honeytoken::Honeytoken>),
     Udp(Arc<udp::UdpResponder>),
+    Iec104(Arc<iec104::Iec104Trap>),
+    Scada(Arc<scada::ScadaTrap>),
+    HighInteraction(Arc<high_interaction::HighInteractionTrap>),
+    LowExtra(Arc<low_extra::LowExtraTrap>),
+    MediumExtra(Arc<medium_extra::MediumExtraTrap>),
 }
 
 impl Trap {
@@ -41,6 +46,11 @@ impl Trap {
             "tarpit" => Trap::Tarpit(Arc::new(tarpit::Tarpit::new(p))),
             "honeytoken" => Trap::Honeytoken(Arc::new(honeytoken::Honeytoken::new(p))),
             "udp" => Trap::Udp(Arc::new(udp::UdpResponder::new(p))),
+            "iec104" => Trap::Iec104(Arc::new(iec104::Iec104Trap::new(p)?)),
+            "scada" => Trap::Scada(Arc::new(scada::ScadaTrap::new(p)?)),
+            "high_interaction" => Trap::HighInteraction(Arc::new(high_interaction::HighInteractionTrap::new(p)?)),
+            "low_extra" => Trap::LowExtra(Arc::new(low_extra::LowExtraTrap::new(p)?)),
+            "medium_extra" => Trap::MediumExtra(Arc::new(medium_extra::MediumExtraTrap::new(p)?)),
             other => return Err(format!("неизвестный класс ловушки: {other}")),
         })
     }
@@ -62,8 +72,15 @@ impl Trap {
             let p = Params(&cfg.params);
             let spec = p.str("ports", &cfg.ports);
             util::parse_ports(&spec)
-        } else {
+        } else if cfg.port != 0 {
             vec![cfg.port]
+        } else {
+            let def = cfg.default_port();
+            if def != 0 {
+                vec![def]
+            } else {
+                vec![cfg.port]
+            }
         }
     }
 
@@ -85,6 +102,11 @@ impl Trap {
             Trap::Tarpit(t) => t.handle(s).await,
             Trap::Honeytoken(t) => t.handle(s).await,
             Trap::Udp(_) => {}
+            Trap::Iec104(t) => t.handle(s).await,
+            Trap::Scada(t) => t.handle(s).await,
+            Trap::HighInteraction(t) => t.handle(s).await,
+            Trap::LowExtra(t) => t.handle(s).await,
+            Trap::MediumExtra(t) => t.handle(s).await,
         }
     }
 }
