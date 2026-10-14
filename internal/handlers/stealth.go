@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
+	"time"
 
 	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/hkdf"
@@ -22,6 +24,115 @@ import (
 	"honeyprower/internal/models"
 )
 
+// ErrReplayDetected is returned when an envelope has already been processed recently.
+var ErrReplayDetected = errors.New("replay detected")
+
+var (
+	replayCachesMu sync.RWMutex
+	replayCaches   = make(map[*Handlers]*ReplayCache)
+)
+
+// ReplayCache tracks recently observed (KeyID + EphemeralPK + Nonce) combinations.
+type ReplayCache struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+	maxSize int
+	ttl     time.Duration
+}
+
+// NewReplayCache creates an anti-replay cache with default or custom bounds.
+func NewReplayCache(maxSize int, ttl time.Duration) *ReplayCache {
+	if maxSize <= 0 {
+		maxSize = 10000
+	}
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	return &ReplayCache{
+		entries: make(map[string]time.Time),
+		maxSize: maxSize,
+		ttl:     ttl,
+	}
+}
+
+// CheckAndRecord returns ErrReplayDetected if the key was already observed within ttl,
+// or records the key with the current timestamp and returns nil.
+func (c *ReplayCache) CheckAndRecord(key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+
+	// Check if already seen
+	if ts, exists := c.entries[key]; exists {
+		if now.Sub(ts) <= c.ttl {
+			return ErrReplayDetected
+		}
+	}
+
+	// Size-bounded eviction: remove expired entries first
+	if len(c.entries) >= c.maxSize {
+		for k, ts := range c.entries {
+			if now.Sub(ts) > c.ttl {
+				delete(c.entries, k)
+			}
+		}
+		// If still at or over maxSize, remove the oldest entry
+		if len(c.entries) >= c.maxSize {
+			var oldestKey string
+			var oldestTime time.Time
+			for k, ts := range c.entries {
+				if oldestKey == "" || ts.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = ts
+				}
+			}
+			if oldestKey != "" {
+				delete(c.entries, oldestKey)
+			}
+		}
+	}
+
+	c.entries[key] = now
+	return nil
+}
+
+// Reset clears all entries in the cache.
+func (c *ReplayCache) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]time.Time)
+}
+
+// getReplayCache retrieves or initializes the ReplayCache for this Handlers instance.
+func (h *Handlers) getReplayCache() *ReplayCache {
+	if h == nil {
+		return NewReplayCache(10000, 24*time.Hour)
+	}
+	replayCachesMu.RLock()
+	c, ok := replayCaches[h]
+	replayCachesMu.RUnlock()
+	if ok {
+		return c
+	}
+
+	replayCachesMu.Lock()
+	defer replayCachesMu.Unlock()
+	if c, ok = replayCaches[h]; ok {
+		return c
+	}
+	c = NewReplayCache(10000, 24*time.Hour)
+	replayCaches[h] = c
+	return c
+}
+
+// ResetReplayCache clears the anti-replay cache for this Handlers instance.
+func (h *Handlers) ResetReplayCache() {
+	if h != nil {
+		h.getReplayCache().Reset()
+	}
+}
+
 // StealthPayload represents the decrypted and decompressed payload structure
 // sent by stealth agents in a binary envelope.
 type StealthPayload struct {
@@ -29,6 +140,7 @@ type StealthPayload struct {
 	Kind   string               `json:"k"`
 	Events []models.IngestEvent `json:"e"`
 }
+
 
 // GenerateTrapCrypto generates KeyID and an X25519 keypair for a given trap token.
 // keyID is the first 8 bytes of SHA-256 of the token (16 lowercase hex characters).
@@ -104,7 +216,14 @@ func (h *Handlers) ProcessStealthEnvelope(ctx context.Context, raw []byte) error
 		return errors.New("stealth envelope too short: minimum length is 68 bytes")
 	}
 
+	// Anti-replay protection: verify (KeyID + EphemeralPK + Nonce) was not previously seen
+	replayKey := hex.EncodeToString(raw[0:52])
+	if err := h.getReplayCache().CheckAndRecord(replayKey); err != nil {
+		return err
+	}
+
 	keyID := hex.EncodeToString(raw[0:8])
+
 	trap, err := h.Store.GetTrapByKeyID(ctx, keyID)
 	if err != nil {
 		return fmt.Errorf("lookup trap by key id failed: %w", err)
