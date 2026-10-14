@@ -124,3 +124,79 @@ func TestValidateParamsKeepsUnknownKeys(t *testing.T) {
 		t.Fatalf("unknown keys must be allowed, got %v", err)
 	}
 }
+
+func TestClasses(t *testing.T) {
+	cls := Classes()
+	if len(cls) != 12 {
+		t.Fatalf("expected 12 classes, got %d", len(cls))
+	}
+
+	expectedClasses := map[string]string{
+		"port_listener":    "Low",
+		"banner":           "Low",
+		"dialog":           "Medium",
+		"http":             "Medium",
+		"tarpit":           "Low",
+		"honeytoken":       "Medium",
+		"udp":              "Low",
+		"iec104":           "ICS/SCADA",
+		"scada":            "ICS/SCADA",
+		"high_interaction": "High",
+		"low_extra":        "Low",
+		"medium_extra":     "Medium",
+	}
+
+	for _, c := range cls {
+		if c.Level == "" {
+			t.Errorf("class %s has empty Level", c.ID)
+		}
+		expectedLevel, ok := expectedClasses[c.ID]
+		if !ok {
+			t.Errorf("unexpected class %s", c.ID)
+		} else if c.Level != expectedLevel {
+			t.Errorf("class %s has level %q, expected %q", c.ID, c.Level, expectedLevel)
+		}
+		if len(c.Fields) == 0 {
+			t.Errorf("class %s has empty Fields", c.ID)
+		}
+	}
+}
+
+func TestPresets(t *testing.T) {
+	presets := Presets()
+	if len(presets) < 14 {
+		t.Fatalf("expected at least 14 presets, got %d", len(presets))
+	}
+
+	requiredPresets := []string{
+		"iec104-substation",
+		"scada-modbus-plc",
+		"high-shell-sandbox",
+		"mqtt-broker",
+	}
+
+	presetMap := make(map[string]Preset)
+	for _, p := range presets {
+		presetMap[p.PresetID] = p
+	}
+
+	for _, reqID := range requiredPresets {
+		p, ok := presetMap[reqID]
+		if !ok {
+			t.Errorf("missing required preset: %s", reqID)
+			continue
+		}
+		if p.Class == "" {
+			t.Errorf("preset %s has empty class", reqID)
+		}
+		if p.Port <= 0 && p.Ports == "" {
+			t.Errorf("preset %s has no port or ports", reqID)
+		}
+		if len(p.Tags) == 0 {
+			t.Errorf("preset %s has no tags", reqID)
+		}
+		if err := ValidateParams(p.Class, decode(t, p.Params)); err != nil {
+			t.Errorf("preset %s params validation failed: %v", reqID, err)
+		}
+	}
+}

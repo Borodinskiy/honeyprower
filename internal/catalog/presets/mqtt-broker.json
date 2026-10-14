@@ -1,0 +1,16 @@
+{
+  "name": "Брокер телеметрии MQTT",
+  "class": "medium_extra",
+  "port": 1883,
+  "tags": [
+    "iot",
+    "mqtt",
+    "scada"
+  ],
+  "description": "Промышленный MQTT-брокер телеметрии для датчиков и устройств АСУ ТП.",
+  "params": {
+    "mode": "mqtt"
+  },
+  "bind": "0.0.0.0",
+  "level": "medium"
+}

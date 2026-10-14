@@ -1,0 +1,21 @@
+{
+  "name": "Подстанция IEC 60870-5-104",
+  "class": "iec104",
+  "port": 2404,
+  "tags": [
+    "ics",
+    "scada",
+    "substation",
+    "iec104"
+  ],
+  "description": "Эмулятор контролируемого пункта (КП) телемеханики подстанции по протоколу МЭК 60870-5-104.",
+  "params": {
+    "breaker_closed": true,
+    "switch_closed": true,
+    "voltage": 220.5,
+    "power": 45.2,
+    "frequency": 50.0
+  },
+  "bind": "0.0.0.0",
+  "level": "ics"
+}

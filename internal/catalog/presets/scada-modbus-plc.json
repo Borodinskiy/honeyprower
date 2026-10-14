@@ -1,0 +1,19 @@
+{
+  "name": "SCADA Modbus TCP PLC",
+  "class": "scada",
+  "port": 502,
+  "tags": [
+    "ics",
+    "scada",
+    "modbus",
+    "plc"
+  ],
+  "description": "Промышленный программируемый логический контроллер Modbus TCP (Schneider Electric Modicon M580) с Web HMI.",
+  "params": {
+    "vendor_name": "Schneider Electric",
+    "product_code": "Modicon M580",
+    "revision": "v4.10"
+  },
+  "bind": "0.0.0.0",
+  "level": "ics"
+}
