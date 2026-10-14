@@ -22,5 +22,10 @@ type Handlers struct {
 
 // Создаёт структуру обработчиков, передавая ей доступ к базе данных и менеджеру авторизации
 func New(dbStorage storage.Storage, authMgr *auth.Manager) *Handlers {
-	return &Handlers{Store: dbStorage, Auth: authMgr, AllowRegistration: true}
+	return &Handlers{
+		Store:             dbStorage,
+		Auth:              authMgr,
+		AllowRegistration: true,
+		Deployer:          deploy.NewSSHDeployer(),
+	}
 }

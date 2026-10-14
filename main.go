@@ -18,6 +18,7 @@ import (
 
 	"honeyprower/internal/auth"
 	"honeyprower/internal/config"
+	"honeyprower/internal/deploy"
 	"honeyprower/internal/handlers"
 	"honeyprower/internal/middleware"
 	"honeyprower/internal/router"
@@ -51,6 +52,7 @@ func main() {
 
 	authMgr := auth.NewManager()
 	handlers := handlers.New(dbStorage, authMgr)
+	handlers.Deployer = deploy.NewSSHDeployer()
 	handlers.AllowRegistration = honeycfg.AllowRegistration
 	handlers.PublicURL = honeycfg.PublicURL
 	if !honeycfg.AllowRegistration {
