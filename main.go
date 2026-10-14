@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -22,6 +23,7 @@ import (
 	"honeyprower/internal/handlers"
 	"honeyprower/internal/middleware"
 	"honeyprower/internal/router"
+	"honeyprower/internal/secret"
 	"honeyprower/internal/storage"
 )
 
@@ -55,6 +57,11 @@ func main() {
 	handlers.Deployer = deploy.NewSSHDeployer()
 	handlers.AllowRegistration = honeycfg.AllowRegistration
 	handlers.PublicURL = honeycfg.PublicURL
+	box, err := loadSecretBox(honeycfg)
+	if err != nil {
+		log.Fatalf("secret key: %v", err)
+	}
+	handlers.Secrets = box
 	if !honeycfg.AllowRegistration {
 		log.Println("WARN: self-registration is disabled in configuration")
 	}
@@ -127,6 +134,25 @@ func main() {
 	os.Exit(exitCode)
 }
 
+// loadSecretBox берёт ключ шифрования SSH-доступа к хостам: HF_SECRET_KEY или
+// файл ключа (создаётся при первом запуске). Без постоянного ключа сохранённые
+// пароли не пережили бы перезапуск, поэтому ошибка здесь фатальна.
+func loadSecretBox(cfg *config.Config) (*secret.Box, error) {
+	if cfg.SecretKey != "" {
+		key, err := secret.ParseKey(cfg.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("HF_SECRET_KEY: %w", err)
+		}
+		return secret.New(key)
+	}
+	key, err := secret.LoadOrCreateKeyFile(cfg.SecretKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("%w (set HF_SECRET_KEY or HF_SECRET_KEY_FILE to a writable path)", err)
+	}
+	log.Printf("host credentials key: %s", cfg.SecretKeyFile)
+	return secret.New(key)
+}
+
 // NewWebMux configures the web server router with authentication checks and route protection.
 func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *http.ServeMux {
 	webMux := http.NewServeMux()
@@ -139,6 +165,9 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 		})
 		webMux.Handle("POST /api/traps/{id}/deploy", slowSSH)
 		webMux.Handle("POST /api/traps/{id}/undeploy", slowSSH)
+		webMux.Handle("POST /api/hosts/{id}/deploy", slowSSH)
+		webMux.Handle("POST /api/hosts/{id}/undeploy", slowSSH)
+		webMux.Handle("GET /api/hosts/{id}/status", slowSSH)
 		webMux.Handle("/cdn-cgi/rum", proxy)
 		webMux.Handle("/v1/rgstr", proxy)
 		webMux.Handle("/api/v2/metrics", proxy)

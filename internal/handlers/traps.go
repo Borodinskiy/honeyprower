@@ -45,6 +45,10 @@ func (h *Handlers) CreateTrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
+	cand := models.Trap{HostID: in.HostID, Class: in.Class, Port: in.Port, Ports: in.Ports, Enabled: in.Enabled}
+	if !h.checkTrapPlacement(w, r, &cand) {
+		return
+	}
 
 	token, err := genToken()
 	if err != nil {
@@ -60,6 +64,10 @@ func (h *Handlers) CreateTrap(w http.ResponseWriter, r *http.Request) {
 	in.PubKey = pubHex
 	in.PrivKey = privHex
 	trap, err := h.Store.CreateTrap(r.Context(), in, token)
+	if errors.Is(err, storage.ErrNoSuchHost) {
+		httpx.WriteError(w, http.StatusBadRequest, "host not found")
+		return
+	}
 	if errors.Is(err, storage.ErrAlreadyExists) {
 		httpx.WriteError(w, http.StatusConflict, "trap token collision, retry")
 		return
@@ -107,17 +115,22 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.Name = &name
 	}
+	if patch.Port != nil && (*patch.Port < 0 || *patch.Port > 65535) {
+		httpx.WriteError(w, http.StatusBadRequest, "port out of range")
+		return
+	}
+
+	// Схема параметров зависит от класса, а проверка портов — от итогового вида ловушки.
+	cur, err := h.Store.GetTrap(r.Context(), id)
+	if errors.Is(err, storage.ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "trap not found")
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap")
+		return
+	}
 	if patch.Params != nil {
-		// Схема параметров зависит от класса, поэтому сначала берём ловушку.
-		cur, err := h.Store.GetTrap(r.Context(), id)
-		if errors.Is(err, storage.ErrNotFound) {
-			httpx.WriteError(w, http.StatusNotFound, "trap not found")
-			return
-		}
-		if err != nil {
-			httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap")
-			return
-		}
 		ports := ""
 		if patch.Ports != nil {
 			ports = *patch.Ports
@@ -132,11 +145,29 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 			patch.Ports = &ports
 		}
 	}
-	if patch.Port != nil && (*patch.Port < 0 || *patch.Port > 65535) {
-		httpx.WriteError(w, http.StatusBadRequest, "port out of range")
+	// Ловушка такой, какой станет после правки.
+	next := *cur
+	if patch.HostID.Set {
+		next.HostID = patch.HostID.ID
+	}
+	if patch.Port != nil {
+		next.Port = *patch.Port
+	}
+	if patch.Ports != nil {
+		next.Ports = *patch.Ports
+	}
+	if patch.Enabled != nil {
+		next.Enabled = *patch.Enabled
+	}
+	if !h.checkTrapPlacement(w, r, &next) {
 		return
 	}
+
 	trap, err := h.Store.UpdateTrap(r.Context(), id, patch)
+	if errors.Is(err, storage.ErrNoSuchHost) {
+		httpx.WriteError(w, http.StatusBadRequest, "host not found")
+		return
+	}
 	if errors.Is(err, storage.ErrNotFound) {
 		httpx.WriteError(w, http.StatusNotFound, "trap not found")
 		return
@@ -173,6 +204,36 @@ func (h *Handlers) Classes(w http.ResponseWriter, r *http.Request) {
 // Presets serves ready-made trap configurations.
 func (h *Handlers) Presets(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, catalog.Presets())
+}
+
+// checkTrapPlacement проверяет, что хост ловушки существует и её порты на нём
+// свободны. При ошибке сам отвечает клиенту и возвращает false.
+func (h *Handlers) checkTrapPlacement(w http.ResponseWriter, r *http.Request, cand *models.Trap) bool {
+	if cand.HostID == nil {
+		return true
+	}
+	if _, err := h.Store.GetHost(r.Context(), *cand.HostID); errors.Is(err, storage.ErrNotFound) {
+		httpx.WriteError(w, http.StatusBadRequest, "host not found")
+		return false
+	} else if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load host")
+		return false
+	}
+	all, err := h.Store.ListTraps(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load traps")
+		return false
+	}
+	if socket, other := portClash(cand, all); other != nil {
+		httpx.WriteJSON(w, http.StatusConflict, map[string]any{
+			"error":  "port conflict",
+			"port":   socket,
+			"trapId": other.ID,
+			"trap":   other.Name,
+		})
+		return false
+	}
+	return true
 }
 
 func validateTrap(in *models.TrapCreate) string {

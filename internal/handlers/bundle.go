@@ -16,55 +16,83 @@ import (
 	"honeyprower/internal/storage"
 )
 
-// Соответствует конфигурации нашей ловушки из config.rs.
+// Соответствует конфигурации ловушки из agent/src/config.rs.
 // Конфигурация отправляется вместе со скомпиленным файлом.
 // Никакие запросы в сервер на получение конифгурации от ловушки поступать не должны.
 type agentTrap struct {
-	Class  string          `json:"class"`
-	Bind   string          `json:"bind"`
-	Port   int             `json:"port"`
-	Ports  string          `json:"ports,omitempty"`
-	Name   string          `json:"name"`
-	Params json.RawMessage `json:"params"`
+	// Токен и ключ — только в конфиге хоста (traps): у каждой ловушки свои.
+	Token        string          `json:"token,omitempty"`
+	ServerPubKey string          `json:"server_pub_key,omitempty"`
+	Class        string          `json:"class"`
+	Bind         string          `json:"bind"`
+	Port         int             `json:"port"`
+	Ports        string          `json:"ports,omitempty"`
+	Name         string          `json:"name"`
+	Params       json.RawMessage `json:"params"`
 }
 
-// Конфигурация агента для отправки логов
+// Конфигурация агента для отправки логов. Одна ловушка — Trap с токеном в
+// корне (старый формат), хост — Traps, по ловушке на элемент.
 type agentConfig struct {
-	CenterURL     string    `json:"center_url"`
-	Token         string    `json:"token"`
-	ServerPubKey  string    `json:"server_pub_key,omitempty"`
-	Transport     string    `json:"transport,omitempty"`
-	StealthPaths  []string  `json:"stealth_paths,omitempty"`
-	JitterS       int       `json:"jitter_s,omitempty"`
-	VerifyTLS     bool      `json:"verify_tls"`
-	RetryInterval int       `json:"retry_interval_s"`
-	Trap          agentTrap `json:"trap"`
+	CenterURL     string      `json:"center_url"`
+	Token         string      `json:"token,omitempty"`
+	ServerPubKey  string      `json:"server_pub_key,omitempty"`
+	Transport     string      `json:"transport,omitempty"`
+	StealthPaths  []string    `json:"stealth_paths,omitempty"`
+	JitterS       int         `json:"jitter_s,omitempty"`
+	VerifyTLS     bool        `json:"verify_tls"`
+	RetryInterval int         `json:"retry_interval_s"`
+	Trap          *agentTrap  `json:"trap,omitempty"`
+	Traps         []agentTrap `json:"traps,omitempty"`
 }
 
-// Собрать конфигурационный файл развёртывания ловушки
-func (h *Handlers) buildConfig(r *http.Request, t *models.Trap) agentConfig {
-	params := t.Params
-	if len(params) == 0 {
-		params = json.RawMessage("{}")
-	}
+func (h *Handlers) baseConfig(r *http.Request) agentConfig {
 	return agentConfig{
 		CenterURL:     h.centerURL(r),
-		Token:         t.Token,
-		ServerPubKey:  t.PubKey,
 		Transport:     "http_nolinger",
 		StealthPaths:  []string{"/cdn-cgi/rum", "/v1/rgstr", "/api/v2/metrics"},
 		JitterS:       10,
 		VerifyTLS:     true,
 		RetryInterval: 10,
-		Trap: agentTrap{
-			Class:  t.Class,
-			Bind:   t.Bind,
-			Port:   t.Port,
-			Ports:  t.Ports,
-			Name:   t.Name,
-			Params: params,
-		},
 	}
+}
+
+func toAgentTrap(t *models.Trap) agentTrap {
+	params := t.Params
+	if len(params) == 0 {
+		params = json.RawMessage("{}")
+	}
+	return agentTrap{
+		Class:  t.Class,
+		Bind:   t.Bind,
+		Port:   t.Port,
+		Ports:  t.Ports,
+		Name:   t.Name,
+		Params: params,
+	}
+}
+
+// Собрать конфигурационный файл развёртывания одной ловушки
+func (h *Handlers) buildConfig(r *http.Request, t *models.Trap) agentConfig {
+	cfg := h.baseConfig(r)
+	cfg.Token = t.Token
+	cfg.ServerPubKey = t.PubKey
+	at := toAgentTrap(t)
+	cfg.Trap = &at
+	return cfg
+}
+
+// Собрать конфиг агента хоста: все переданные ловушки, у каждой свои токен и ключ.
+func (h *Handlers) buildHostConfig(r *http.Request, traps []models.Trap) agentConfig {
+	cfg := h.baseConfig(r)
+	cfg.Traps = make([]agentTrap, 0, len(traps))
+	for i := range traps {
+		at := toAgentTrap(&traps[i])
+		at.Token = traps[i].Token
+		at.ServerPubKey = traps[i].PubKey
+		cfg.Traps = append(cfg.Traps, at)
+	}
+	return cfg
 }
 
 // Получить URL сервера, куда агент сохраняет логи.

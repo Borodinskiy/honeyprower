@@ -9,6 +9,28 @@ CREATE TABLE IF NOT EXISTS users (
 -- Логины регистронезависимы: вход ищет по LOWER(username), уникальность — тоже.
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_key ON users (LOWER(username));
 
+-- Хост: сервер, на котором один агент держит все свои ловушки. Центр хранит
+-- SSH-доступ к нему, чтобы разворачивать, обновлять и снимать агента.
+-- Пароли и ключи — шифротекст (internal/secret), не открытый текст.
+CREATE TABLE IF NOT EXISTS hosts (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    address VARCHAR(255) NOT NULL,
+    ssh_port INT NOT NULL DEFAULT 22,
+    username VARCHAR(255) NOT NULL,
+    auth_type VARCHAR(16) NOT NULL DEFAULT 'password',
+    use_sudo BOOLEAN NOT NULL DEFAULT FALSE,
+    password_enc TEXT NOT NULL DEFAULT '',
+    private_key_enc TEXT NOT NULL DEFAULT '',
+    sudo_password_enc TEXT NOT NULL DEFAULT '',
+    deployed_at TIMESTAMPTZ,
+    deployed_hash TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Один сервер — один агент: два хоста с тем же адресом затирали бы друг друга.
+CREATE UNIQUE INDEX IF NOT EXISTS hosts_address_port_key ON hosts (LOWER(address), ssh_port);
+
 -- Определение ловушки: оператор создаёт его на сайте, агент запускает по нему
 -- бинарник и шлёт телеметрию; связь агент→центр по token.
 CREATE TABLE IF NOT EXISTS traps (
@@ -29,6 +51,11 @@ CREATE TABLE IF NOT EXISTS traps (
 );
 
 CREATE INDEX IF NOT EXISTS traps_key_id_idx ON traps (key_id);
+
+-- Хост ловушки; NULL — ловушка ещё ни к какому хосту не привязана. ALTER, а не
+-- колонка в CREATE TABLE: так она появится и в уже существующих базах.
+ALTER TABLE traps ADD COLUMN IF NOT EXISTS host_id BIGINT REFERENCES hosts(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS traps_host_id_idx ON traps (host_id);
 
 CREATE TABLE IF NOT EXISTS events (
     id BIGSERIAL PRIMARY KEY,

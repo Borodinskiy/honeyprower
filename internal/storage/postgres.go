@@ -77,10 +77,151 @@ func (p *Postgres) Close() error {
 	return p.db.Close()
 }
 
+// ---------------- hosts ----------------
+
+const hostCols = `id, name, address, ssh_port, username, auth_type, use_sudo,
+	password_enc, private_key_enc, sudo_password_enc, deployed_at, deployed_hash, created_at`
+
+func scanHost(row interface{ Scan(...any) error }) (*models.Host, error) {
+	var h models.Host
+	var deployedAt sql.NullTime
+	if err := row.Scan(&h.ID, &h.Name, &h.Address, &h.SSHPort, &h.Username, &h.AuthType, &h.UseSudo,
+		&h.PasswordEnc, &h.PrivateKeyEnc, &h.SudoPasswordEnc, &deployedAt, &h.DeployedHash, &h.CreatedAt); err != nil {
+		return nil, err
+	}
+	if deployedAt.Valid {
+		t := deployedAt.Time
+		h.DeployedAt = &t
+	}
+	return &h, nil
+}
+
+func (p *Postgres) ListHosts(ctx context.Context) ([]models.Host, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT `+hostCols+` FROM hosts ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hosts := []models.Host{}
+	for rows.Next() {
+		h, err := scanHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, *h)
+	}
+	return hosts, rows.Err()
+}
+
+func (p *Postgres) GetHost(ctx context.Context, id int64) (*models.Host, error) {
+	h, err := scanHost(p.db.QueryRowContext(ctx, `SELECT `+hostCols+` FROM hosts WHERE id = $1`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return h, err
+}
+
+func (p *Postgres) CreateHost(ctx context.Context, in models.Host) (*models.Host, error) {
+	var id int64
+	err := p.db.QueryRowContext(ctx, `
+		INSERT INTO hosts (name, address, ssh_port, username, auth_type, use_sudo,
+			password_enc, private_key_enc, sudo_password_enc)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id
+	`, in.Name, in.Address, in.SSHPort, in.Username, in.AuthType, in.UseSudo,
+		in.PasswordEnc, in.PrivateKeyEnc, in.SudoPasswordEnc).Scan(&id)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrAlreadyExists
+		}
+		return nil, err
+	}
+	return p.GetHost(ctx, id)
+}
+
+func (p *Postgres) UpdateHost(ctx context.Context, id int64, patch models.HostPatch) (*models.Host, error) {
+	var set []string
+	var args []any
+	add := func(col string, val any) {
+		args = append(args, val)
+		set = append(set, fmt.Sprintf("%s = $%d", col, len(args)))
+	}
+	if patch.Name != nil {
+		add("name", *patch.Name)
+	}
+	if patch.Address != nil {
+		add("address", *patch.Address)
+	}
+	if patch.SSHPort != nil {
+		add("ssh_port", *patch.SSHPort)
+	}
+	if patch.Username != nil {
+		add("username", *patch.Username)
+	}
+	if patch.AuthType != nil {
+		add("auth_type", *patch.AuthType)
+	}
+	if patch.UseSudo != nil {
+		add("use_sudo", *patch.UseSudo)
+	}
+	if patch.PasswordEnc != nil {
+		add("password_enc", *patch.PasswordEnc)
+	}
+	if patch.PrivateKeyEnc != nil {
+		add("private_key_enc", *patch.PrivateKeyEnc)
+	}
+	if patch.SudoPasswordEnc != nil {
+		add("sudo_password_enc", *patch.SudoPasswordEnc)
+	}
+	if len(set) == 0 {
+		return p.GetHost(ctx, id)
+	}
+	args = append(args, id)
+	res, err := p.db.ExecContext(ctx,
+		fmt.Sprintf("UPDATE hosts SET %s WHERE id = $%d", strings.Join(set, ", "), len(args)), args...)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrAlreadyExists
+		}
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return p.GetHost(ctx, id)
+}
+
+func (p *Postgres) DeleteHost(ctx context.Context, id int64) error {
+	// Ловушки хоста отвязывает ON DELETE SET NULL.
+	res, err := p.db.ExecContext(ctx, "DELETE FROM hosts WHERE id = $1", id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (p *Postgres) SetHostDeployed(ctx context.Context, id int64, at *time.Time, hash string) error {
+	if at == nil {
+		hash = ""
+	}
+	res, err := p.db.ExecContext(ctx,
+		"UPDATE hosts SET deployed_at = $1, deployed_hash = $2 WHERE id = $3", at, hash, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ---------------- traps ----------------
 
 const trapCols = `
-	t.id, t.name, t.class, t.bind, t.port, t.ports, t.params, t.token, t.key_id, t.pub_key, t.priv_key, t.enabled, t.last_seen, t.created_at,
+	t.id, t.host_id, t.name, t.class, t.bind, t.port, t.ports, t.params, t.token, t.key_id, t.pub_key, t.priv_key, t.enabled, t.last_seen, t.created_at,
 	(SELECT COUNT(*) FROM events e WHERE e.trap_id = t.id),
 	(SELECT COUNT(*) FROM events e WHERE e.trap_id = t.id AND e.event_type IN ('auth','scan','token')),
 	(SELECT MAX(ts) FROM events e WHERE e.trap_id = t.id)`
@@ -88,16 +229,21 @@ const trapCols = `
 func scanTrap(row interface{ Scan(...any) error }) (*models.Trap, error) {
 	var t models.Trap
 	var params []byte
+	var hostID sql.NullInt64
 	var lastSeen sql.NullTime
 	var lastTS sql.NullFloat64
 	if err := row.Scan(
-		&t.ID, &t.Name, &t.Class, &t.Bind, &t.Port, &t.Ports, &params, &t.Token,
+		&t.ID, &hostID, &t.Name, &t.Class, &t.Bind, &t.Port, &t.Ports, &params, &t.Token,
 		&t.KeyID, &t.PubKey, &t.PrivKey, &t.Enabled,
 		&lastSeen, &t.CreatedAt, &t.TotalEvents, &t.Warnings, &lastTS,
 	); err != nil {
 		return nil, err
 	}
 	t.Params = json.RawMessage(params)
+	if hostID.Valid {
+		id := hostID.Int64
+		t.HostID = &id
+	}
 	if lastSeen.Valid {
 		ls := lastSeen.Time
 		t.LastSeen = &ls
@@ -165,11 +311,14 @@ func (p *Postgres) CreateTrap(ctx context.Context, in models.TrapCreate, token s
 	}
 	var id int64
 	err := p.db.QueryRowContext(ctx, `
-		INSERT INTO traps (name, class, bind, port, ports, params, token, key_id, pub_key, priv_key, enabled)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO traps (host_id, name, class, bind, port, ports, params, token, key_id, pub_key, priv_key, enabled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id
-	`, in.Name, in.Class, in.Bind, in.Port, in.Ports, []byte(params), token, in.KeyID, in.PubKey, in.PrivKey, in.Enabled).Scan(&id)
+	`, in.HostID, in.Name, in.Class, in.Bind, in.Port, in.Ports, []byte(params), token, in.KeyID, in.PubKey, in.PrivKey, in.Enabled).Scan(&id)
 	if err != nil {
+		if isForeignKeyViolation(err) {
+			return nil, ErrNoSuchHost
+		}
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyExists
 		}
@@ -186,6 +335,9 @@ func (p *Postgres) UpdateTrap(ctx context.Context, id int64, patch models.TrapPa
 		set = append(set, fmt.Sprintf("%s = $%d", col, i))
 		args = append(args, val)
 		i++
+	}
+	if patch.HostID.Set {
+		add("host_id", patch.HostID.ID)
 	}
 	if patch.Name != nil {
 		add("name", *patch.Name)
@@ -221,6 +373,9 @@ func (p *Postgres) UpdateTrap(ctx context.Context, id int64, patch models.TrapPa
 	res, err := p.db.ExecContext(ctx,
 		fmt.Sprintf("UPDATE traps SET %s WHERE id = $%d", strings.Join(set, ", "), i), args...)
 	if err != nil {
+		if isForeignKeyViolation(err) {
+			return nil, ErrNoSuchHost
+		}
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
@@ -453,6 +608,11 @@ func nz(s, def string) string {
 		return def
 	}
 	return s
+}
+
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
 func isUniqueViolation(err error) bool {

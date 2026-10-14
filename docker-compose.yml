@@ -31,6 +31,10 @@ services:
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
       # Внешний адрес центра, который увидят агенты на удалённых серверах (нужен для деплоя по SSH).
       PUBLIC_URL: ${PUBLIC_URL:-}
+      # Ключ шифрования SSH-паролей хостов. Пусто — ключ создаётся в томе appdata (data/secret.key).
+      HF_SECRET_KEY: ${HF_SECRET_KEY:-}
+    volumes:
+      - appdata:/app/data
     ports:
       - "${WEB_PORT:-8080}:8080"
 
@@ -60,3 +64,4 @@ services:
 
 volumes:
   pgdata:
+  appdata:

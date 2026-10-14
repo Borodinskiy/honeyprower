@@ -20,6 +20,11 @@ type Config struct {
 	AllowRegistration bool   // разрешена ли самостоятельная регистрация операторов
 	FallbackInMemory  bool   // использовать ли базу данных в ОЗУ при ошибке подключения к настоящей бд
 	PublicURL         string // внешний адрес центра для агентов (в config.json); пусто — из запроса
+
+	// Ключ шифрования SSH-доступа к хостам: HF_SECRET_KEY (64 hex, base64 32 байт
+	// или фраза от 16 символов), иначе файл SecretKeyFile, создаваемый при первом запуске.
+	SecretKey     string
+	SecretKeyFile string
 }
 
 // TODO: чтение конфигурационных файлов помимо переменных окружения
@@ -34,6 +39,9 @@ func Load() *Config {
 		AllowRegistration: getbool("ALLOW_REGISTRATION", true),
 		FallbackInMemory:  getbool("FALLBACK_INMEMORY", false),
 		PublicURL:         os.Getenv("PUBLIC_URL"),
+
+		SecretKey:     os.Getenv("HF_SECRET_KEY"),
+		SecretKeyFile: getenv("HF_SECRET_KEY_FILE", "data/secret.key"),
 	}
 }
 

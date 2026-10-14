@@ -18,6 +18,19 @@ import (
 // after the test. Without TEST_DB_DSN the test is skipped.
 func newTestPostgres(t *testing.T) (*Postgres, string) {
 	t.Helper()
+	dsn, _ := newTestSchema(t)
+	p, err := NewPostgres(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	return p, dsn
+}
+
+// newTestSchema creates an empty temporary schema and returns a DSN pointing at
+// it plus a connection already bound to it.
+func newTestSchema(t *testing.T) (string, *sql.DB) {
+	t.Helper()
 	dsn := os.Getenv("TEST_DB_DSN")
 	if dsn == "" {
 		t.Skip("TEST_DB_DSN not set, skipping PostgreSQL integration test")
@@ -43,12 +56,12 @@ func newTestPostgres(t *testing.T) (*Postgres, string) {
 	q.Set("search_path", schema)
 	u.RawQuery = q.Encode()
 
-	p, err := NewPostgres(ctx, u.String())
+	conn, err := sql.Open("pgx", u.String())
 	if err != nil {
-		t.Fatalf("NewPostgres: %v", err)
+		t.Fatalf("open schema conn: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Close() })
-	return p, u.String()
+	t.Cleanup(func() { _ = conn.Close() })
+	return u.String(), conn
 }
 
 func TestPostgresIntegration(t *testing.T) {
@@ -62,14 +75,14 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 	_ = p2.Close()
 
-	// Seed has admin user + one example trap.
+	// Seed has admin user + demo traps.
 	admin, err := p.GetUserByUsername(ctx, "ADMIN")
 	if err != nil || admin.Username != "admin" {
 		t.Fatalf("seed admin: %+v, %v", admin, err)
 	}
 	traps, err := p.ListTraps(ctx)
-	if err != nil || len(traps) != 2 {
-		t.Fatalf("expected 2 seeded traps, got %d (%v)", len(traps), err)
+	if err != nil || len(traps) != 5 {
+		t.Fatalf("expected 5 seeded traps, got %d (%v)", len(traps), err)
 	}
 	if traps[0].Class != "banner" || traps[0].Status != "never" {
 		t.Fatalf("unexpected seeded trap: %+v", traps[0])
@@ -143,5 +156,58 @@ func TestPostgresIntegration(t *testing.T) {
 	var left int
 	if err := p.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE trap_id = $1", created.ID).Scan(&left); err != nil || left != 0 {
 		t.Fatalf("expected cascaded events, left=%d err=%v", left, err)
+	}
+}
+
+// Базы, созданные до появления хостов: при старте центра у traps появляется
+// host_id, старые ловушки остаются без хоста и не теряют событий.
+func TestPostgresUpgradesSchemaWithoutHosts(t *testing.T) {
+	dsn, conn := newTestSchema(t)
+	ctx := context.Background()
+	if _, err := conn.ExecContext(ctx, `
+		CREATE TABLE users (
+			id BIGSERIAL PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, email VARCHAR(255) NOT NULL,
+			password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+		CREATE TABLE traps (
+			id BIGSERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, class VARCHAR(50) NOT NULL,
+			bind VARCHAR(255) NOT NULL DEFAULT '0.0.0.0', port INT NOT NULL DEFAULT 0,
+			ports VARCHAR(255) NOT NULL DEFAULT '', params JSONB NOT NULL DEFAULT '{}'::jsonb,
+			token TEXT UNIQUE NOT NULL, key_id VARCHAR(16) NOT NULL DEFAULT '', pub_key TEXT NOT NULL DEFAULT '',
+			priv_key TEXT NOT NULL DEFAULT '', enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			last_seen TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+		CREATE TABLE events (
+			id BIGSERIAL PRIMARY KEY, trap_id BIGINT NOT NULL REFERENCES traps(id) ON DELETE CASCADE,
+			event_type VARCHAR(50) NOT NULL, proto VARCHAR(16) NOT NULL DEFAULT 'tcp',
+			src_ip VARCHAR(64) NOT NULL DEFAULT '', src_port INT NOT NULL DEFAULT 0, dst_port INT NOT NULL DEFAULT 0,
+			session VARCHAR(64) NOT NULL DEFAULT '', username TEXT, password TEXT,
+			data JSONB NOT NULL DEFAULT '{}'::jsonb, ts DOUBLE PRECISION NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+		INSERT INTO traps (name, class, port, token) VALUES ('old', 'banner', 2222, 'tok-old');
+		INSERT INTO events (trap_id, event_type, ts) VALUES (1, 'connect', 1700000000);
+	`); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+
+	p, err := NewPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("NewPostgres on old schema: %v", err)
+	}
+	defer p.Close()
+
+	old, err := p.GetTrapByToken(ctx, "tok-old")
+	if err != nil || old.HostID != nil || old.TotalEvents != 1 {
+		t.Fatalf("old trap after upgrade: %+v, %v", old, err)
+	}
+	// Непустая база не засеивается заново.
+	if traps, _ := p.ListTraps(ctx); len(traps) != 1 {
+		t.Fatalf("seed must not run on an existing database, traps=%d", len(traps))
+	}
+	h, err := p.CreateHost(ctx, models.Host{Name: "h", Address: "10.1.1.1", SSHPort: 22, Username: "root", AuthType: "password"})
+	if err != nil {
+		t.Fatalf("CreateHost after upgrade: %v", err)
+	}
+	moved, err := p.UpdateTrap(ctx, old.ID, models.TrapPatch{HostID: models.OptionalID{Set: true, ID: &h.ID}})
+	if err != nil || moved.HostID == nil || *moved.HostID != h.ID {
+		t.Fatalf("assign old trap to host: %+v, %v", moved, err)
 	}
 }

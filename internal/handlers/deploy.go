@@ -124,52 +124,16 @@ func (h *Handlers) HandleDeployTrap(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case "deploy":
+		// Агент на сервере один: ловушка хоста, развёрнутая отдельно, затёрла бы остальные его ловушки.
+		if trap.HostID != nil {
+			httpx.WriteError(w, http.StatusConflict, "trap belongs to a host; deploy the host instead")
+			return
+		}
 		cfg := h.buildConfig(r, trap)
-		// Агент на другой машине не достучится до центра по localhost: подставляем адрес центра,
-		// видимый из сети цели. Если цель — сама машина центра, localhost подходит как есть.
-		if isLoopbackHost(hostOf(cfg.CenterURL)) && !isLocalHost(target.Host) {
-			u, _ := url.Parse(cfg.CenterURL)
-			ip, err := outboundIP(target.Host, target.Port)
-			if err != nil {
-				httpx.WriteError(w, http.StatusBadRequest, "center url is loopback; set PUBLIC_URL")
-				return
-			}
-			if port := u.Port(); port != "" {
-				u.Host = net.JoinHostPort(ip, port)
-			} else {
-				u.Host = ip
-			}
-			cfg.CenterURL = u.String()
-		}
-		cfgBytes, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			httpx.WriteError(w, http.StatusInternalServerError, "failed to marshal agent config")
+		payload, status, msg := h.agentPayload(&cfg, target)
+		if msg != "" {
+			httpx.WriteError(w, status, msg)
 			return
-		}
-
-		svcPath := os.Getenv("HF_AGENT_SERVICE")
-		if svcPath == "" {
-			svcPath = "agent/honeyforge-agent.service"
-		}
-		svcBytes, err := os.ReadFile(svcPath)
-		if err != nil {
-			httpx.WriteError(w, http.StatusInternalServerError, "failed to read systemd service file")
-			return
-		}
-
-		binPath := os.Getenv("HF_AGENT_BIN")
-		if binPath == "" {
-			binPath = "agent/target/release/honeyforge-agent"
-		}
-		if _, err := os.Stat(binPath); err != nil {
-			httpx.WriteError(w, http.StatusInternalServerError, "agent binary not found; please build the agent first")
-			return
-		}
-
-		payload := deploy.Payload{
-			BinaryPath:     binPath,
-			ServiceContent: svcBytes,
-			ConfigJSON:     cfgBytes,
 		}
 
 		// Общий WriteTimeout сервера (15 с) оборвал бы ответ посреди деплоя.
@@ -229,6 +193,50 @@ func (h *Handlers) HandleUndeployTrap(w http.ResponseWriter, r *http.Request) {
 		TrapID: id,
 		Host:   target.Host,
 	})
+}
+
+// agentPayload готовит файлы для установки агента с конфигом cfg на target.
+// Если центр открыт по localhost, адрес в cfg заменяется на видимый из сети цели.
+// При ошибке возвращает HTTP-статус и сообщение.
+func (h *Handlers) agentPayload(cfg *agentConfig, target deploy.TargetConfig) (deploy.Payload, int, string) {
+	// Агент на другой машине не достучится до центра по localhost: подставляем адрес центра,
+	// видимый из сети цели. Если цель — сама машина центра, localhost подходит как есть.
+	if isLoopbackHost(hostOf(cfg.CenterURL)) && !isLocalHost(target.Host) {
+		u, _ := url.Parse(cfg.CenterURL)
+		ip, err := outboundIP(target.Host, target.Port)
+		if err != nil {
+			return deploy.Payload{}, http.StatusBadRequest, "center url is loopback; set PUBLIC_URL"
+		}
+		if port := u.Port(); port != "" {
+			u.Host = net.JoinHostPort(ip, port)
+		} else {
+			u.Host = ip
+		}
+		cfg.CenterURL = u.String()
+	}
+	cfgBytes, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return deploy.Payload{}, http.StatusInternalServerError, "failed to marshal agent config"
+	}
+
+	svcPath := os.Getenv("HF_AGENT_SERVICE")
+	if svcPath == "" {
+		svcPath = "agent/honeyforge-agent.service"
+	}
+	svcBytes, err := os.ReadFile(svcPath)
+	if err != nil {
+		return deploy.Payload{}, http.StatusInternalServerError, "failed to read systemd service file"
+	}
+
+	binPath := os.Getenv("HF_AGENT_BIN")
+	if binPath == "" {
+		binPath = "agent/target/release/honeyforge-agent"
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		return deploy.Payload{}, http.StatusInternalServerError, "agent binary not found; please build the agent first"
+	}
+
+	return deploy.Payload{BinaryPath: binPath, ServiceContent: svcBytes, ConfigJSON: cfgBytes}, 0, ""
 }
 
 // decodeTarget reads and checks SSH connection settings; on failure the error is already written.

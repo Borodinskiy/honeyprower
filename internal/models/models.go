@@ -15,10 +15,76 @@ type User struct {
 	CreatedAt    time.Time `json:"-"`
 }
 
+// Host is a server that runs one agent with all of its traps. The center keeps
+// its SSH access to deploy, update and remove that agent.
+type Host struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Address  string `json:"address"` // IP or DNS name for SSH
+	SSHPort  int    `json:"sshPort"`
+	Username string `json:"username"`
+	AuthType string `json:"authType"` // password | key
+	UseSudo  bool   `json:"useSudo"`
+
+	// Encrypted with secret.Box; never sent to the browser.
+	PasswordEnc     string `json:"-"`
+	PrivateKeyEnc   string `json:"-"`
+	SudoPasswordEnc string `json:"-"`
+
+	// When the agent with the current set of traps was last installed (nil — not deployed).
+	DeployedAt   *time.Time `json:"deployedAt,omitempty"`
+	DeployedHash string     `json:"-"` // fingerprint of the traps that were deployed
+	CreatedAt    time.Time  `json:"createdAt"`
+
+	// Read-side, filled by the handlers:
+	HasPassword     bool `json:"hasPassword"`
+	HasPrivateKey   bool `json:"hasPrivateKey"`
+	HasSudoPassword bool `json:"hasSudoPassword"`
+	TrapCount       int  `json:"trapCount"`
+	EnabledTraps    int  `json:"enabledTraps"`
+	OnlineTraps     int  `json:"onlineTraps"`
+	PendingChanges  bool `json:"pendingChanges"` // traps changed since the last deploy
+}
+
+// HostPatch updates a host; nil fields stay as they are.
+type HostPatch struct {
+	Name            *string
+	Address         *string
+	SSHPort         *int
+	Username        *string
+	AuthType        *string
+	UseSudo         *bool
+	PasswordEnc     *string
+	PrivateKeyEnc   *string
+	SudoPasswordEnc *string
+}
+
+// OptionalID tells an absent JSON field from an explicit null:
+// {"hostId": null} unassigns the trap, a missing hostId leaves it alone.
+type OptionalID struct {
+	Set bool
+	ID  *int64
+}
+
+func (o *OptionalID) UnmarshalJSON(b []byte) error {
+	o.Set = true
+	if string(b) == "null" {
+		o.ID = nil
+		return nil
+	}
+	var v int64
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	o.ID = &v
+	return nil
+}
+
 // Trap is a honeypot definition the operator creates on the site. A Rust agent
 // runs it from a generated config and streams events back, matched by Token.
 type Trap struct {
 	ID        int64           `json:"id"`
+	HostID    *int64          `json:"hostId"` // nil — not assigned to a host
 	Name      string          `json:"name"`
 	Class     string          `json:"class"`
 	Bind      string          `json:"bind"`
@@ -42,6 +108,7 @@ type Trap struct {
 
 // TrapCreate is the body for POST /api/traps.
 type TrapCreate struct {
+	HostID  *int64          `json:"hostId,omitempty"`
 	Name    string          `json:"name"`
 	Class   string          `json:"class"`
 	Bind    string          `json:"bind"`
@@ -56,6 +123,7 @@ type TrapCreate struct {
 
 // TrapPatch is the body for PATCH /api/traps/{id} (all fields optional).
 type TrapPatch struct {
+	HostID  OptionalID       `json:"hostId"`
 	Name    *string          `json:"name,omitempty"`
 	Bind    *string          `json:"bind,omitempty"`
 	Port    *int             `json:"port,omitempty"`

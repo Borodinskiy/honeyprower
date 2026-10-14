@@ -35,6 +35,16 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	mux.Handle("GET /api/classes", requireAuth(http.HandlerFunc(handlers.Classes)))
 	mux.Handle("GET /api/presets", requireAuth(http.HandlerFunc(handlers.Presets)))
 
+	mux.Handle("GET /api/hosts", requireAuth(http.HandlerFunc(handlers.ListHosts)))
+	mux.Handle("POST /api/hosts", requireAuth(http.HandlerFunc(handlers.CreateHost)))
+	mux.Handle("GET /api/hosts/{id}", requireAuth(http.HandlerFunc(handlers.GetHost)))
+	mux.Handle("PATCH /api/hosts/{id}", requireAuth(http.HandlerFunc(handlers.UpdateHost)))
+	mux.Handle("DELETE /api/hosts/{id}", requireAuth(http.HandlerFunc(handlers.DeleteHost)))
+	mux.Handle("GET /api/hosts/{id}/config", requireAuth(http.HandlerFunc(handlers.HostConfig)))
+	mux.Handle("GET /api/hosts/{id}/status", requireAuth(http.HandlerFunc(handlers.HostStatus)))
+	mux.Handle("POST /api/hosts/{id}/deploy", requireAuth(http.HandlerFunc(handlers.DeployHost)))
+	mux.Handle("POST /api/hosts/{id}/undeploy", requireAuth(http.HandlerFunc(handlers.UndeployHost)))
+
 	mux.Handle("GET /api/traps", requireAuth(http.HandlerFunc(handlers.ListTraps)))
 	mux.Handle("POST /api/traps", requireAuth(http.HandlerFunc(handlers.CreateTrap)))
 	mux.Handle("GET /api/traps/{id}", requireAuth(http.HandlerFunc(handlers.GetTrap)))

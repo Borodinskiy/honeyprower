@@ -126,26 +126,53 @@ HoneyForge разделяет ловушки на четыре специали�
 
 ---
 
-## 4. Удалённое развертывание (`SSHDeployer`)
+## 4. Хосты и удалённое развертывание
 
-Модуль `internal/deploy/ssh.go` реализует полное управление жизненным циклом агентов через SSH:
+**Хост** — сервер, на котором один агент держит все свои ловушки. Оператор
+один раз добавляет хост (адрес, SSH-порт, пользователь, пароль или ключ,
+sudo), создаёт на нём ловушки и разворачивает агента кнопкой. Агент хоста
+получает конфиг со всеми включёнными ловушками (`traps: [...]`), у каждой
+свой токен и ключ шифрования, поэтому события в центре остаются привязаны к
+конкретной ловушке.
 
-1. **`Deploy(ctx, target, payload)`**:
-   - Идемпотентная доставка бинарника в `/usr/local/bin/honeyforge-agent` (`0755`).
-   - Создание `/etc/honeyforge` и сохранение `/etc/honeyforge/config.json` (`0644`).
-   - Установка systemd unit `/etc/systemd/system/honeyforge-agent.service` (`0644`).
-   - Выполнение `systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service`.
-   - Проверка здоровья сервиса (`checkActiveState`).
-2. **`Status(ctx, target)`**:
-   - Опрос `systemctl is-active honeyforge-agent.service`.
-   - Разбор слушающих портов через `ss -tlpn || netstat -tlpn`.
-   - Получение времени работы через `systemctl show -p ActiveEnterTimestamp`.
-3. **`Restart(ctx, target)`**:
-   - Выполнение `systemctl restart honeyforge-agent.service` с контролем возврата в статус `active`.
-4. **`Stop(ctx, target)`**:
-   - Остановка службы через `systemctl stop honeyforge-agent.service`.
-5. **`Uninstall(ctx, target)`**:
-   - Остановка, отключение автозапуска, удаление бинарника, конфигов и systemd unit файла с перезагрузкой демона.
+- **SSH-доступ хранится зашифрованным** (AES-256-GCM, `internal/secret`) и в
+  браузер не возвращается. Ключ — `HF_SECRET_KEY` или файл
+  `HF_SECRET_KEY_FILE` (по умолчанию `data/secret.key`, создаётся при первом
+  запуске; в Docker лежит в томе `appdata`). Потеряли ключ — введите пароли
+  хостов заново в «Изменить хост».
+- **Порты ловушек одного хоста не пересекаются**: центр отвечает `409 port
+  conflict` при сохранении, агент дополнительно проверяет это при запуске.
+- **«Есть неприменённые изменения»**: центр помнит отпечаток развёрнутого
+  набора ловушек и показывает, что конфиг на сервере устарел.
+- Ловушки без хоста остаются в разделе «Без хоста»: их можно запустить
+  вручную по `config.json` или перенести на хост.
+
+API (все маршруты требуют сессии оператора):
+
+| Метод и путь | Что делает |
+|---|---|
+| `GET/POST /api/hosts`, `GET/PATCH/DELETE /api/hosts/{id}` | Хосты. Пустой пароль/ключ в `PATCH` — оставить сохранённый. `DELETE` развёрнутого хоста — `409`, пока агент не снят (или `?force=true`). Ловушки удалённого хоста остаются без хоста. |
+| `POST /api/hosts/{id}/deploy` | Ставит или обновляет агента со всеми включёнными ловушками хоста. |
+| `POST /api/hosts/{id}/undeploy` | Останавливает агента и удаляет его файлы с сервера. |
+| `GET /api/hosts/{id}/status` | `systemctl is-active`, слушающие порты и порты ловушек, которые не открыты. |
+| `GET /api/hosts/{id}/config` | `config.json` агента хоста для ручного запуска. |
+| `POST/PATCH /api/traps` с `hostId` | Привязка ловушки к хосту; `"hostId": null` — отвязать. |
+
+Деплой (`internal/deploy/ssh.go`) идёт по SSH, при необходимости через `sudo`:
+
+1. Бинарник → `/usr/local/bin/honeyforge-agent`, конфиг → `/etc/honeyforge/config.json`,
+   unit → `/etc/systemd/system/honeyforge-agent.service`; `restorecon` для SELinux;
+   `systemctl daemon-reload && enable && restart`.
+2. Проверка: через 3 с служба должна быть `active`. Агент сам занимает все
+   порты при старте и при ошибке пишет, какой порт какой ловушки занят, —
+   этот текст и возвращается оператору.
+3. **Откат**: после успешной проверки версия сохраняется в
+   `/var/lib/honeyforge/last-good`. Если новая версия не запустилась,
+   возвращается последняя рабочая — ловушки хоста продолжают работать. Если
+   возвращать нечего (или и она не стартует), служба останавливается, а хост
+   в центре помечается неразвёрнутым.
+4. Снятие: `systemctl disable --now`, удаление бинарника, конфига, unit-файла
+   и `/var/lib/honeyforge`.
 
 ---
 
@@ -343,6 +370,9 @@ curl -i http://localhost:502/api/tags
 | `API_ADDR`           | `127.0.0.1:8081`    | Внутренний адрес API-сервера                    |
 | `STATIC_DIR`         | `./Web`             | Путь к статическим файлам веб-интерфейса        |
 | `PUBLIC_URL`         | — (из запроса)      | Внешний URL центра для формируемых конфигов     |
+| `HF_SECRET_KEY`      | —                   | Ключ шифрования SSH-доступа к хостам: 64 hex-символа, base64 от 32 байт или фраза от 16 символов |
+| `HF_SECRET_KEY_FILE` | `data/secret.key`   | Файл ключа, если `HF_SECRET_KEY` не задан (создаётся при первом запуске, права `0600`) |
+| `HF_AGENT_BIN`, `HF_AGENT_SERVICE` | `agent/target/release/honeyforge-agent`, `agent/honeyforge-agent.service` | Бинарник агента и unit-файл для деплоя по SSH |
 | `ALLOW_REGISTRATION` | `true`              | `false` — запрет регистрации новых операторов  |
 | `DB_DSN` / `DATABASE_URL` | —              | Строка подключения к PostgreSQL                |
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSLMODE` | `localhost`, `5432`, `postgres`, `postgres`, `honeyforge`, `disable` | Параметры подключения к СУБД |
