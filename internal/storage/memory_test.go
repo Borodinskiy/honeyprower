@@ -69,7 +69,7 @@ func TestMemoryTrapsAndEvents(t *testing.T) {
 	}
 
 	// Filter by type
-	auths, err := store.ListEvents(ctx, models.EventFilter{TrapID: created.ID, EventType: "auth"})
+	auths, err := store.ListFilterEvents(ctx, models.EventFilter{TrapID: created.ID, EventType: "auth"})
 	if err != nil || len(auths) != 1 {
 		t.Fatalf("expected 1 auth event, got %d (%v)", len(auths), err)
 	}
@@ -77,12 +77,12 @@ func TestMemoryTrapsAndEvents(t *testing.T) {
 		t.Fatalf("auth username lost: %+v", auths[0])
 	}
 	// Filter by src across all traps
-	bySrc, _ := store.ListEvents(ctx, models.EventFilter{SrcIP: "10.0.0.9"})
+	bySrc, _ := store.ListFilterEvents(ctx, models.EventFilter{SrcIP: "10.0.0.9"})
 	if len(bySrc) != 2 {
 		t.Fatalf("expected 2 events by src, got %d", len(bySrc))
 	}
 	// Events for missing trap
-	if _, err := store.ListEvents(ctx, models.EventFilter{TrapID: 999}); !errors.Is(err, ErrNotFound) {
+	if _, err := store.ListFilterEvents(ctx, models.EventFilter{TrapID: 999}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for events of missing trap, got %v", err)
 	}
 

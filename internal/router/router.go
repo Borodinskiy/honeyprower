@@ -44,7 +44,7 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	mux.Handle("GET /api/traps/{id}/config", requireAuth(http.HandlerFunc(handlers.TrapConfig)))
 	mux.Handle("GET /api/traps/{id}/bundle", requireAuth(http.HandlerFunc(handlers.TrapBundle)))
 
-	mux.Handle("GET /api/events", requireAuth(http.HandlerFunc(handlers.ListEvents)))
+	mux.Handle("GET /api/events", requireAuth(http.HandlerFunc(handlers.ListFilterEvents)))
 	mux.Handle("GET /api/stats", requireAuth(http.HandlerFunc(handlers.GetStats)))
 
 	// Защита от CSRF; /api/ingest исключён — это серверный канал агентов,

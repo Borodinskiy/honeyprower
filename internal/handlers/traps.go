@@ -270,4 +270,5 @@ func genToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// Возвращает идентификатор из строки
 func parseID(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }

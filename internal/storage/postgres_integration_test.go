@@ -119,11 +119,11 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 
 	// Filter events
-	auths, err := p.ListEvents(ctx, models.EventFilter{TrapID: created.ID, EventType: "auth"})
+	auths, err := p.ListFilterEvents(ctx, models.EventFilter{TrapID: created.ID, EventType: "auth"})
 	if err != nil || len(auths) != 1 || auths[0].Username == nil || *auths[0].Username != "root" {
 		t.Fatalf("auth filter: %+v, %v", auths, err)
 	}
-	bySrc, _ := p.ListEvents(ctx, models.EventFilter{SrcIP: "203.0.113.5"})
+	bySrc, _ := p.ListFilterEvents(ctx, models.EventFilter{SrcIP: "203.0.113.5"})
 	if len(bySrc) != 2 {
 		t.Fatalf("expected 2 by src, got %d", len(bySrc))
 	}
@@ -137,7 +137,7 @@ func TestPostgresIntegration(t *testing.T) {
 	if err := p.DeleteTrap(ctx, created.ID); err != nil {
 		t.Fatalf("DeleteTrap: %v", err)
 	}
-	if _, err := p.ListEvents(ctx, models.EventFilter{TrapID: created.ID}); !errors.Is(err, ErrNotFound) {
+	if _, err := p.ListFilterEvents(ctx, models.EventFilter{TrapID: created.ID}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for events of deleted trap, got %v", err)
 	}
 	var left int

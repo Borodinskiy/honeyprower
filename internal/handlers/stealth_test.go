@@ -295,9 +295,9 @@ func TestStealthEnvelope(t *testing.T) {
 	}
 
 	// Check that event was saved to storage
-	events, err := mem.ListEvents(ctx, models.EventFilter{TrapID: trap.ID})
+	events, err := mem.ListFilterEvents(ctx, models.EventFilter{TrapID: trap.ID})
 	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
+		t.Fatalf("ListFilterEvents: %v", err)
 	}
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event stored, got %d", len(events))
@@ -360,9 +360,9 @@ func TestStealthHeartbeat(t *testing.T) {
 	}
 
 	// Ensure no events were created
-	events, err := mem.ListEvents(ctx, models.EventFilter{TrapID: trap.ID})
+	events, err := mem.ListFilterEvents(ctx, models.EventFilter{TrapID: trap.ID})
 	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
+		t.Fatalf("ListFilterEvents: %v", err)
 	}
 	if len(events) != 0 {
 		t.Fatalf("expected 0 events, got %d", len(events))

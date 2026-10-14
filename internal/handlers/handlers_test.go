@@ -225,7 +225,7 @@ func TestIngestFlow(t *testing.T) {
 	// The event landed and is filterable.
 	req = httptest.NewRequest(http.MethodGet, "/api/events?type=auth", nil)
 	w = httptest.NewRecorder()
-	h.ListEvents(w, req)
+	h.ListFilterEvents(w, req)
 	var events []models.Event
 	json.NewDecoder(w.Body).Decode(&events)
 	if w.Code != http.StatusOK || len(events) != 1 || *events[0].Username != "root" {

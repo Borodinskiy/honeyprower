@@ -301,7 +301,7 @@ func (p *Postgres) TouchTrap(ctx context.Context, token string) error {
 	return nil
 }
 
-func (p *Postgres) ListEvents(ctx context.Context, f models.EventFilter) ([]models.Event, error) {
+func (p *Postgres) ListFilterEvents(ctx context.Context, f models.EventFilter) ([]models.Event, error) {
 	if f.TrapID != 0 {
 		var exists bool
 		if err := p.db.QueryRowContext(ctx,

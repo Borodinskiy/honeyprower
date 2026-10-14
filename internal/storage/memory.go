@@ -274,7 +274,7 @@ func (m *Memory) TouchTrap(_ context.Context, token string) error {
 	return nil
 }
 
-func (m *Memory) ListEvents(_ context.Context, f models.EventFilter) ([]models.Event, error) {
+func (m *Memory) ListFilterEvents(_ context.Context, f models.EventFilter) ([]models.Event, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

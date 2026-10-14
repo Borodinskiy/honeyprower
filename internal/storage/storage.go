@@ -31,7 +31,7 @@ type Storage interface {
 	// --- events ---
 	// InsertEvent stores one piece of telemetry and refreshes the trap's last-seen.
 	InsertEvent(ctx context.Context, trapID int64, ev models.IngestEvent) (*models.Event, error)
-	ListEvents(ctx context.Context, f models.EventFilter) ([]models.Event, error)
+	ListFilterEvents(ctx context.Context, f models.EventFilter) ([]models.Event, error)
 
 	// TouchTrap refreshes last-seen for a heartbeat (no event stored).
 	TouchTrap(ctx context.Context, token string) error

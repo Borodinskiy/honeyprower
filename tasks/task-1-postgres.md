@@ -42,7 +42,7 @@ Entry point is in `main.go`.
      - `CreateTrap(ctx context.Context, in models.TrapCreate) (*models.Trap, error)`
      - `UpdateTrap(ctx context.Context, id int64, patch models.TrapPatch) (*models.Trap, error)`
      - `DeleteTrap(ctx context.Context, id int64) error`
-     - `ListEvents(ctx context.Context, trapID int64) ([]models.Event, error)`
+     - `ListFilterEvents(ctx context.Context, trapID int64) ([]models.Event, error)`
      - `GetStats(ctx context.Context) (*models.Stats, error)`
      - `CreateUser(ctx context.Context, u *models.User) (*models.User, error)`
      - `GetUserByUsername(ctx context.Context, username string) (*models.User, error)`
