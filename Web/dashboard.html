@@ -54,6 +54,7 @@
                 <div class="traps-actions">
                     <button class="btn btn-secondary" id="open-events-trap-btn" disabled hidden>События</button>
                     <button class="btn btn-secondary" id="open-edit-trap-btn" disabled hidden>Редактировать</button>
+                    <button class="btn btn-secondary" id="open-deploy-trap-btn" disabled hidden>Развернуть по SSH</button>
                     <button class="btn btn-danger" id="delete-trap-btn" disabled hidden>Удалить</button>
                     <button class="btn" id="open-create-trap-btn">+ Создать ловушку</button>
                 </div>
@@ -183,7 +184,81 @@
             <div class="traps-actions">
                 <a id="download-config-btn" class="btn btn-success" href="#" download>Скачать config.json</a>
                 <a id="download-bundle-btn" class="btn btn-secondary" href="#" download>Скачать .zip (конфиг + инструкция)</a>
+                <button type="button" id="created-deploy-btn" class="btn">Развернуть по SSH</button>
             </div>
+        </div>
+    </div>
+
+    <!-- МОДАЛЬНОЕ ОКНО РАЗВЕРТЫВАНИЯ ЛОВУШКИ ПО SSH -->
+    <div id="deploy-trap-modal" class="modal-overlay">
+        <div class="modal-content modal-wide">
+            <span class="close-btn" data-close-modal="deploy-trap-modal">&times;</span>
+            <h2 id="deploy-modal-title">Развертывание ловушки по SSH</h2>
+            <p class="field-help" id="deploy-trap-subtitle">Автоматическая установка агента, настройка службы systemd и запуск ловушки на удаленном Linux-сервере.</p>
+
+            <form id="deploy-trap-form">
+                <input type="hidden" id="deploy-trap-id">
+
+                <div style="display: flex; gap: 15px;">
+                    <div class="form-group" style="flex: 3;">
+                        <label for="deploy-host">Хост / IP-адрес сервера <span style="color: var(--color-danger);">*</span></label>
+                        <input type="text" id="deploy-host" required placeholder="Например: 192.168.1.50 или honeypot.internal">
+                    </div>
+                    <div class="form-group" style="flex: 1;">
+                        <label for="deploy-port">SSH Порт</label>
+                        <input type="number" id="deploy-port" value="22" min="1" max="65535" placeholder="22">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="deploy-username">Имя пользователя SSH <span style="color: var(--color-danger);">*</span></label>
+                    <input type="text" id="deploy-username" required value="root" placeholder="root">
+                </div>
+
+                <div class="form-group">
+                    <label>Способ аутентификации</label>
+                    <div style="display: flex; gap: 20px; margin: 8px 0;">
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                            <input type="radio" name="deploy-auth-type" value="password" checked id="deploy-auth-password-radio">
+                            <span>Пароль SSH</span>
+                        </label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                            <input type="radio" name="deploy-auth-type" value="key" id="deploy-auth-key-radio">
+                            <span>Приватный SSH-ключ</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-group" id="deploy-password-group">
+                    <label for="deploy-password">Пароль SSH</label>
+                    <input type="password" id="deploy-password" placeholder="Введите пароль пользователя SSH">
+                </div>
+
+                <div class="form-group" id="deploy-key-group" style="display: none;">
+                    <label for="deploy-key">Приватный ключ SSH (OpenSSH / PEM)</label>
+                    <textarea id="deploy-key" class="code-input" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <input type="checkbox" id="deploy-use-sudo">
+                    <label for="deploy-use-sudo">Использовать sudo (если подключаетесь не под root)</label>
+                </div>
+
+                <div class="form-group" id="deploy-root-password-group" style="display: none;">
+                    <label for="deploy-root-password">Пароль root / sudo (если отличается от пароля SSH)</label>
+                    <input type="password" id="deploy-root-password" placeholder="Оставьте пустым, если совпадает с паролем SSH">
+                </div>
+
+                <div id="deploy-status" class="deploy-status-box" style="display: none;">
+                    <div class="deploy-spinner" id="deploy-spinner"></div>
+                    <div id="deploy-status-text"></div>
+                </div>
+
+                <div class="traps-actions" style="margin-top: 20px; justify-content: flex-end;">
+                    <button type="button" class="btn btn-secondary" data-close-modal="deploy-trap-modal">Отмена</button>
+                    <button type="submit" class="btn btn-success" id="deploy-submit-btn">Развернуть ловушку</button>
+                </div>
+            </form>
         </div>
     </div>
 

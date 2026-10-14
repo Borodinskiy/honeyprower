@@ -62,13 +62,13 @@ class ApiError extends Error {
 //  API-СЛОЙ
 
 const api = {
-    async _request(endpoint, { method = 'GET', body = null, auth = true } = {}) {
+    async _request(endpoint, { method = 'GET', body = null, auth = true, timeout = CONFIG.REQUEST_TIMEOUT } = {}) {
         const url = `${CONFIG.API_BASE_URL}${endpoint}`;
 
         const headers = { 'Content-Type': 'application/json' };
 
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT);
+        const timer = setTimeout(() => controller.abort(), timeout);
 
         try {
             const res = await fetch(url, {
@@ -87,7 +87,8 @@ const api = {
             const data = res.status === 204 ? null : await res.json().catch(() => null);
 
             if (!res.ok) {
-                throw new ApiError(data?.message || `HTTP ${res.status}`, res.status, data);
+                const msg = data?.error || data?.message || `HTTP ${res.status}`;
+                throw new ApiError(msg, res.status, data);
             }
 
             return data;
@@ -158,6 +159,19 @@ const api = {
             return { ok: true };
         }
         return this._request(`/traps/${id}`, { method: 'DELETE' });
+    },
+
+    async deployTrap(id, target) {
+        if (CONFIG.USE_MOCK_DATA) {
+            await new Promise(r => setTimeout(r, 1200));
+            const trap = MOCK_DATA.traps.find(t => t.id === Number(id));
+            if (trap) {
+                trap.active = true;
+                trap.status = 'online';
+            }
+            return { status: 'deployed', trapId: Number(id), host: target.host };
+        }
+        return this._request(`/traps/${id}/deploy`, { method: 'POST', body: target, timeout: 60000 });
     },
 
     async getTrapEvents(id, type = '') {
@@ -362,7 +376,32 @@ const I18N_DICT = {
     "Логин слишком длинный.": "Username is too long.",
     "Некорректный email.": "Invalid email.",
     "Заполните название, тип и адрес.": "Fill in name, type and target.",
-    "Слишком длинное значение поля.": "Field value is too long."
+    "Слишком длинное значение поля.": "Field value is too long.",
+
+    "Развернуть по SSH": "Deploy via SSH",
+    "Развертывание ловушки": "Deploy trap",
+    "Развертывание ловушки по SSH": "Deploy Trap via SSH",
+    "Автоматическая установка агента, настройка службы systemd и запуск ловушки на удаленном Linux-сервере.": "Automatic agent installation, systemd service configuration, and honeypot start on remote Linux server.",
+    "Хост / IP-адрес сервера": "Host / Server IP address",
+    "SSH Порт": "SSH Port",
+    "Имя пользователя SSH": "SSH Username",
+    "Способ аутентификации": "Authentication Method",
+    "Пароль SSH": "SSH Password",
+    "Приватный SSH-ключ": "Private SSH Key",
+    "Приватный ключ SSH (OpenSSH / PEM)": "Private SSH key (OpenSSH / PEM)",
+    "Использовать sudo (если подключаетесь не под root)": "Use sudo (if not connecting as root)",
+    "Пароль root / sudo (если отличается от пароля SSH)": "Root / sudo password (if different from SSH password)",
+    "Развернуть ловушку": "Deploy Trap",
+    "Подключение к серверу и установка агента...": "Connecting to server and deploying agent...",
+    "Ловушка успешно развернута на": "Trap successfully deployed on",
+    "Служба honeyforge-agent запущена.": "honeyforge-agent service is running.",
+    "Ошибка развертывания": "Deployment error",
+    "Укажите хост сервера": "Specify server host",
+    "Укажите имя пользователя SSH": "Specify SSH username",
+    "Введите пароль SSH": "Enter SSH password",
+    "Вставьте приватный SSH-ключ": "Paste private SSH key",
+    "Готово": "Done",
+    "Закрыть": "Close"
 };
 
 // Известные сообщения бэкенда → русские ключи словаря (см. internal/handlers)
@@ -378,7 +417,16 @@ const SERVER_ERROR_LABELS = {
     'name, type and target must not be empty': 'Заполните название, тип и адрес.',
     'name is too long': 'Слишком длинное значение поля.',
     'type is too long': 'Слишком длинное значение поля.',
-    'target is too long': 'Слишком длинное значение поля.'
+    'target is too long': 'Слишком длинное значение поля.',
+    'host is required': 'Укажите хост сервера.',
+    'username is required': 'Укажите имя пользователя SSH.',
+    'password or privateKey is required': 'Требуется пароль или приватный SSH-ключ.',
+    'trap not found': 'Ловушка не найдена.',
+    'deployer not configured': 'Служба деплоя недоступна на сервере.',
+    'deployer service unavailable': 'Служба деплоя недоступна на сервере.',
+    'systemd unit file not found': 'Unit-файл systemd не найден на сервере.',
+    'failed to read systemd service file': 'Не удалось прочитать unit-файл службы systemd.',
+    'agent binary not found; please build the agent first': 'Бинарный файл агента не найден на сервере.'
 };
 
 const I18N_REVERSE = Object.fromEntries(
@@ -488,10 +536,11 @@ function updateTrapActions() {
 
     const eventsBtn = document.getElementById('open-events-trap-btn');
     const editBtn = document.getElementById('open-edit-trap-btn');
+    const deployBtn = document.getElementById('open-deploy-trap-btn');
     const deleteBtn = document.getElementById('delete-trap-btn');
 
     // Кнопки действий показываем только при выбранной ловушке — без выбора они лишь мешают.
-    for (const btn of [eventsBtn, editBtn, deleteBtn]) {
+    for (const btn of [eventsBtn, editBtn, deployBtn, deleteBtn]) {
         if (!btn) continue;
         btn.disabled = !hasSelection;
         btn.hidden = !hasSelection;
@@ -1112,10 +1161,72 @@ function openTrapModal(mode, trapId = null) {
 
 // Показывает окно с инструкцией запуска агента и ссылками на конфиг/бандл.
 function showCreatedModal(trap) {
+    state.lastCreatedTrap = trap;
     document.getElementById('created-token').value = trap.token || '';
     document.getElementById('download-config-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/config`;
     document.getElementById('download-bundle-btn').href = `${CONFIG.API_BASE_URL}/traps/${trap.id}/bundle`;
     openModal('trap-created-modal');
+}
+
+// Открывает окно развертывания ловушки по SSH
+function openDeployTrapModal(trapId) {
+    const trap = state.traps.find(t => t.id === Number(trapId));
+    if (!trap) return;
+
+    state.deployingTrapId = trap.id;
+    const modalTitle = document.getElementById('deploy-modal-title');
+    if (modalTitle) {
+        modalTitle.textContent = `${t('Развертывание ловушки')} «${trap.name}»`;
+    }
+
+    const trapIdInput = document.getElementById('deploy-trap-id');
+    if (trapIdInput) trapIdInput.value = trap.id;
+
+    // Сброс значений полей формы
+    const hostInput = document.getElementById('deploy-host');
+    if (hostInput) hostInput.value = '';
+
+    const portInput = document.getElementById('deploy-port');
+    if (portInput) portInput.value = '22';
+
+    const usernameInput = document.getElementById('deploy-username');
+    if (usernameInput) usernameInput.value = 'root';
+
+    const passwordRadio = document.getElementById('deploy-auth-password-radio');
+    if (passwordRadio) passwordRadio.checked = true;
+
+    const passwordGroup = document.getElementById('deploy-password-group');
+    if (passwordGroup) passwordGroup.style.display = '';
+
+    const passwordInput = document.getElementById('deploy-password');
+    if (passwordInput) passwordInput.value = '';
+
+    const keyGroup = document.getElementById('deploy-key-group');
+    if (keyGroup) keyGroup.style.display = 'none';
+
+    const keyInput = document.getElementById('deploy-key');
+    if (keyInput) keyInput.value = '';
+
+    const sudoCheckbox = document.getElementById('deploy-use-sudo');
+    if (sudoCheckbox) sudoCheckbox.checked = false;
+
+    const rootPassGroup = document.getElementById('deploy-root-password-group');
+    if (rootPassGroup) rootPassGroup.style.display = 'none';
+
+    const rootPassInput = document.getElementById('deploy-root-password');
+    if (rootPassInput) rootPassInput.value = '';
+
+    const statusBox = document.getElementById('deploy-status');
+    if (statusBox) statusBox.style.display = 'none';
+
+    const submitBtn = document.getElementById('deploy-submit-btn');
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = t('Развернуть ловушку');
+        submitBtn.onclick = null;
+    }
+
+    openModal('deploy-trap-modal');
 }
 
 
@@ -1543,6 +1654,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
+    const deployBtn = document.getElementById('open-deploy-trap-btn');
+    if (deployBtn) {
+        deployBtn.addEventListener('click', () => {
+            if (state.selectedTrapId === null) return;
+            openDeployTrapModal(state.selectedTrapId);
+        });
+    }
+
+    const createdDeployBtn = document.getElementById('created-deploy-btn');
+    if (createdDeployBtn) {
+        createdDeployBtn.addEventListener('click', () => {
+            if (!state.lastCreatedTrap) return;
+            closeModal('trap-created-modal');
+            openDeployTrapModal(state.lastCreatedTrap.id);
+        });
+    }
+
     // --- Меню пользователя ---
     const userMenuBtn = document.getElementById('user-menu-btn');
     const userDropdown = document.getElementById('user-dropdown');
@@ -1606,6 +1734,128 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const registerFormEl = document.getElementById('register-form-el');
     if (registerFormEl) registerFormEl.addEventListener('submit', handleRegister);
+
+    // --- Переключение метода аутентификации в модалке деплоя ---
+    document.querySelectorAll('input[name="deploy-auth-type"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            const isKey = e.target.value === 'key';
+            const passGroup = document.getElementById('deploy-password-group');
+            const keyGroup = document.getElementById('deploy-key-group');
+            if (passGroup) passGroup.style.display = isKey ? 'none' : '';
+            if (keyGroup) keyGroup.style.display = isKey ? '' : 'none';
+        });
+    });
+
+    // --- Переключение sudo в модалке деплоя ---
+    const sudoCheckbox = document.getElementById('deploy-use-sudo');
+    if (sudoCheckbox) {
+        sudoCheckbox.addEventListener('change', (e) => {
+            const rootPassGroup = document.getElementById('deploy-root-password-group');
+            if (rootPassGroup) rootPassGroup.style.display = e.target.checked ? '' : 'none';
+        });
+    }
+
+    // --- Отправка формы деплоя ---
+    const deployFormEl = document.getElementById('deploy-trap-form');
+    if (deployFormEl) {
+        deployFormEl.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const trapId = Number(document.getElementById('deploy-trap-id').value);
+            const host = document.getElementById('deploy-host').value.trim();
+            const port = parseInt(document.getElementById('deploy-port').value, 10) || 22;
+            const username = document.getElementById('deploy-username').value.trim();
+            const authType = document.querySelector('input[name="deploy-auth-type"]:checked')?.value || 'password';
+            const password = document.getElementById('deploy-password').value;
+            const privateKey = document.getElementById('deploy-key').value.trim();
+            const useSudo = document.getElementById('deploy-use-sudo').checked;
+            const rootPassword = document.getElementById('deploy-root-password').value;
+
+            const statusBox = document.getElementById('deploy-status');
+            const statusText = document.getElementById('deploy-status-text');
+            const spinner = document.getElementById('deploy-spinner');
+            const submitBtn = document.getElementById('deploy-submit-btn');
+
+            if (!host) {
+                if (statusBox && statusText) {
+                    statusBox.style.display = 'flex';
+                    statusBox.className = 'deploy-status-box deploy-status-error';
+                    spinner.style.display = 'none';
+                    statusText.textContent = t('Укажите хост сервера');
+                }
+                return;
+            }
+
+            if (!username) {
+                if (statusBox && statusText) {
+                    statusBox.style.display = 'flex';
+                    statusBox.className = 'deploy-status-box deploy-status-error';
+                    spinner.style.display = 'none';
+                    statusText.textContent = t('Укажите имя пользователя SSH');
+                }
+                return;
+            }
+
+            if (authType === 'password' && !password) {
+                if (statusBox && statusText) {
+                    statusBox.style.display = 'flex';
+                    statusBox.className = 'deploy-status-box deploy-status-error';
+                    spinner.style.display = 'none';
+                    statusText.textContent = t('Введите пароль SSH');
+                }
+                return;
+            }
+
+            if (authType === 'key' && !privateKey) {
+                if (statusBox && statusText) {
+                    statusBox.style.display = 'flex';
+                    statusBox.className = 'deploy-status-box deploy-status-error';
+                    spinner.style.display = 'none';
+                    statusText.textContent = t('Вставьте приватный SSH-ключ');
+                }
+                return;
+            }
+
+            // Показываем индикатор выполнения
+            statusBox.style.display = 'flex';
+            statusBox.className = 'deploy-status-box deploy-status-loading';
+            spinner.style.display = 'block';
+            statusText.textContent = t('Подключение к серверу и установка агента...');
+            submitBtn.disabled = true;
+
+            const payload = {
+                host,
+                port,
+                username,
+                password: authType === 'password' ? password : '',
+                privateKey: authType === 'key' ? privateKey : '',
+                useSudo,
+                rootPassword
+            };
+
+            try {
+                const res = await api.deployTrap(trapId, payload);
+                statusBox.className = 'deploy-status-box deploy-status-success';
+                spinner.style.display = 'none';
+                statusText.textContent = `${t('Ловушка успешно развернута на')} ${res.host || host}! ${t('Служба honeyforge-agent запущена.')}`;
+                submitBtn.disabled = false;
+                submitBtn.textContent = t('Закрыть');
+                submitBtn.onclick = (ev) => {
+                    ev.preventDefault();
+                    closeModal('deploy-trap-modal');
+                    submitBtn.onclick = null;
+                };
+
+                // Обновляем список ловушек
+                await refreshAll();
+            } catch (err) {
+                statusBox.className = 'deploy-status-box deploy-status-error';
+                spinner.style.display = 'none';
+                statusText.textContent = `${t('Ошибка развертывания')}: ${err.message}`;
+                submitBtn.disabled = false;
+            }
+        });
+    }
 
     // --- Первичный перевод, восстановление сессии, загрузка данных ---
     translateStatic();
