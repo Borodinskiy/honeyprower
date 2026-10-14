@@ -16,33 +16,42 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_BUFFER: usize = 50_000;
 
-static LAST_INGEST_TS: AtomicU64 = AtomicU64::new(0);
-static LAST_INGEST_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Фиксирует успешную отправку телеметрии (ingest), сбрасывая таймер heartbeat (piggybacking).
-pub fn record_ingest_sent() {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    LAST_INGEST_TS.store(now, Ordering::SeqCst);
-    LAST_INGEST_COUNT.fetch_add(1, Ordering::SeqCst);
+/// Когда отправитель ловушки последний раз доставил события в центр. Heartbeat
+/// той же ловушки по нему пропускает свой такт (piggybacking). У каждой ловушки
+/// свои часы: иначе события одной гасили бы heartbeat'ы остальных.
+#[derive(Clone, Default)]
+pub struct IngestClock {
+    ts: Arc<AtomicU64>,
+    count: Arc<AtomicU64>,
 }
 
-/// Возвращает Unix-timestamp (в секундах) последней успешной отправки телеметрии.
-pub fn last_ingest_sent() -> u64 {
-    LAST_INGEST_TS.load(Ordering::SeqCst)
-}
+impl IngestClock {
+    /// Фиксирует успешную отправку телеметрии (ingest).
+    pub fn record(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.ts.store(now, Ordering::SeqCst);
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
 
-/// Возвращает монотонный счетчик успешных отправок телеметрии.
-pub fn last_ingest_count() -> u64 {
-    LAST_INGEST_COUNT.load(Ordering::SeqCst)
+    /// Unix-время (в секундах) последней успешной отправки.
+    pub fn last_sent(&self) -> u64 {
+        self.ts.load(Ordering::SeqCst)
+    }
+
+    /// Монотонный счётчик успешных отправок.
+    pub fn count(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone)]
@@ -304,6 +313,7 @@ fn flush_envelopes(
     agent: &ureq::Agent,
     buffer_path: &Path,
     pending: &mut VecDeque<Vec<u8>>,
+    clock: &IngestClock,
 ) -> usize {
     let mut sent = 0;
     while let Some(env) = pending.front() {
@@ -311,7 +321,7 @@ fn flush_envelopes(
             Ok(_) => {
                 pending.pop_front();
                 sent += 1;
-                record_ingest_sent();
+                clock.record();
             }
             Err(e) => {
                 if e.contains("rejected") || e.contains("401") || e.contains("404") {
@@ -336,6 +346,7 @@ fn handle_events(
     buffer_path: &Path,
     pending: &mut VecDeque<Vec<u8>>,
     events: Vec<Event>,
+    clock: &IngestClock,
 ) {
     if events.is_empty() {
         return;
@@ -360,7 +371,7 @@ fn handle_events(
         if pending.is_empty() {
             match send_envelope(cfg, agent, &env) {
                 Ok(_) => {
-                    record_ingest_sent();
+                    clock.record();
                 }
                 Err(_) => {
                     if pending.len() >= MAX_BUFFER {
@@ -380,12 +391,13 @@ fn handle_events(
     }
 
     if !pending.is_empty() {
-        flush_envelopes(cfg, agent, buffer_path, pending);
+        flush_envelopes(cfg, agent, buffer_path, pending, clock);
     }
 }
 
 /// Запускает поток-отправитель и возвращает «раковину», которую раздают ловушкам.
-pub fn start(cfg: Config, buffer_path: PathBuf) -> EventSink {
+/// clock — общие с heartbeat'ом той же ловушки часы отправок.
+pub fn start(cfg: Config, buffer_path: PathBuf, clock: IngestClock) -> EventSink {
     let buffer_path = cfg
         .buffer_path
         .as_ref()
@@ -426,7 +438,7 @@ pub fn start(cfg: Config, buffer_path: PathBuf) -> EventSink {
         let retry = Duration::from_secs(cfg.retry_interval_s.max(1));
 
         if !pending.is_empty() {
-            flush_envelopes(&cfg, &agent, &buffer_path, &mut pending);
+            flush_envelopes(&cfg, &agent, &buffer_path, &mut pending, &clock);
         }
 
         loop {
@@ -436,16 +448,16 @@ pub fn start(cfg: Config, buffer_path: PathBuf) -> EventSink {
                     while let Ok(next) = rx.try_recv() {
                         incoming.push(next);
                     }
-                    handle_events(&cfg, &agent, &buffer_path, &mut pending, incoming);
+                    handle_events(&cfg, &agent, &buffer_path, &mut pending, incoming, &clock);
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if !pending.is_empty() {
-                        flush_envelopes(&cfg, &agent, &buffer_path, &mut pending);
+                        flush_envelopes(&cfg, &agent, &buffer_path, &mut pending, &clock);
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     if !pending.is_empty() {
-                        flush_envelopes(&cfg, &agent, &buffer_path, &mut pending);
+                        flush_envelopes(&cfg, &agent, &buffer_path, &mut pending, &clock);
                     }
                     return;
                 }
@@ -460,7 +472,7 @@ pub fn start(cfg: Config, buffer_path: PathBuf) -> EventSink {
 ///
 /// Интервал вычисляется как interval + rand::thread_rng().gen_range(0..=cfg.jitter_s).
 /// При успешной отправке реальных событий (ingest) таймер сбрасывается (piggybacking).
-pub fn start_heartbeat(cfg: Config) {
+pub fn start_heartbeat(cfg: Config, clock: IngestClock) {
     if cfg.heartbeat_interval_s == 0 {
         return;
     }
@@ -478,14 +490,14 @@ pub fn start_heartbeat(cfg: Config) {
             let period_secs = cfg.heartbeat_interval_s + jitter;
             let period = Duration::from_secs(period_secs);
             let start_instant = Instant::now();
-            let start_count = last_ingest_count();
+            let start_count = clock.count();
             let check_interval = Duration::from_millis(100);
 
             let mut piggybacked = false;
             while start_instant.elapsed() < period {
                 let remaining = period.saturating_sub(start_instant.elapsed());
                 thread::sleep(remaining.min(check_interval));
-                if last_ingest_count() > start_count {
+                if clock.count() > start_count {
                     // При успешной отправке реальных событий (ingest) таймер heartbeat сбрасывается (piggybacking)
                     piggybacked = true;
                     break;
@@ -787,9 +799,23 @@ mod tests {
 
     #[test]
     fn test_piggybacking_and_jitter() {
-        let initial_count = last_ingest_count();
-        record_ingest_sent();
-        assert!(last_ingest_count() > initial_count);
-        assert!(last_ingest_sent() > 0);
+        let clock = IngestClock::default();
+        assert_eq!(clock.count(), 0);
+        assert_eq!(clock.last_sent(), 0);
+        clock.clone().record();
+        assert_eq!(clock.count(), 1, "клон делит часы с оригиналом");
+        assert!(clock.last_sent() > 0);
+    }
+
+    #[test]
+    fn ingest_clocks_are_independent_per_trap() {
+        // Отправка событий одной ловушкой не должна гасить heartbeat другой.
+        let a = IngestClock::default();
+        let b = IngestClock::default();
+        a.record();
+        a.record();
+        assert_eq!(a.count(), 2);
+        assert_eq!(b.count(), 0);
+        assert_eq!(b.last_sent(), 0);
     }
 }

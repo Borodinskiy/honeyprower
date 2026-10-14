@@ -1,5 +1,9 @@
-//! Конфиг ловушки. Едет вместе с бинарником (файл рядом), из центра ничего
-//! не приходит. Чтобы поменять ловушку — правят конфиг и запускают заново.
+//! Конфиг агента. Едет вместе с бинарником (файл рядом), из центра ничего
+//! не приходит. Чтобы поменять ловушки — правят конфиг и запускают заново.
+//!
+//! Один агент обслуживает все ловушки своего хоста: они перечислены в `traps`,
+//! у каждой свой токен и ключ, поэтому центр различает их телеметрию. Старый
+//! формат с одной ловушкой (`token` + `trap`) по-прежнему читается.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -8,13 +12,18 @@ use serde_json::Value;
 pub struct Config {
     /// Базовый адрес центра, например http://127.0.0.1:8080. События уходят на {center_url}/api/ingest.
     pub center_url: String,
-    /// Токен ловушки: по нему центр узнаёт, чья это телеметрия.
+    /// Токен ловушки (старый формат с одной `trap`): по нему центр узнаёт, чья это телеметрия.
+    #[serde(default)]
     pub token: String,
     /// Проверять ли TLS-сертификат центра (по умолчанию да).
     #[serde(default = "default_true")]
     pub verify_tls: bool,
-    /// Описание самой ловушки.
-    pub trap: TrapConfig,
+    /// Одна ловушка (старый формат).
+    #[serde(default)]
+    pub trap: Option<TrapConfig>,
+    /// Ловушки хоста, у каждой свои token и server_pub_key.
+    #[serde(default)]
+    pub traps: Vec<TrapConfig>,
     /// Через сколько секунд повторять отправку, если центр недоступен.
     #[serde(default = "default_retry")]
     pub retry_interval_s: u64,
@@ -43,6 +52,12 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrapConfig {
+    /// Токен этой ловушки (в `traps`); в старом формате берётся из корня конфига.
+    #[serde(default)]
+    pub token: String,
+    /// Открытый ключ центра для конвертов этой ловушки; пусто — из корня конфига.
+    #[serde(default)]
+    pub server_pub_key: String,
     pub class: String,
     #[serde(default = "default_bind")]
     pub bind: String,
@@ -52,12 +67,11 @@ pub struct TrapConfig {
     #[serde(default)]
     pub ports: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub name: String,
     #[serde(default)]
     pub params: Value,
     /// Секрет для ключей, которые должны переживать перезапуск (ключ хоста SSH).
-    /// В конфиге его нет: main подставляет токен ловушки.
+    /// В конфиге его нет: Config::units подставляет токен ловушки.
     #[serde(skip)]
     pub key_seed: String,
 }
@@ -132,7 +146,69 @@ fn default_jitter() -> u64 {
     10
 }
 
+/// Ловушка, готовая к запуску: её описание и настройки отправки событий
+/// (корневой конфиг с токеном и ключом именно этой ловушки).
+#[derive(Debug, Clone)]
+pub struct TrapUnit {
+    pub trap: TrapConfig,
+    pub sender: Config,
+}
+
+impl TrapConfig {
+    /// Как называть ловушку в сообщениях: имя из центра или номер и класс.
+    pub fn label(&self, idx: usize) -> String {
+        if self.name.trim().is_empty() {
+            format!("#{} ({})", idx + 1, self.class)
+        } else {
+            format!("«{}»", self.name.trim())
+        }
+    }
+}
+
 impl Config {
+    /// Раскладывает конфиг на ловушки. Проверяет то, без чего агент не сможет
+    /// отправить телеметрию: у каждой ловушки есть токен и токены не повторяются.
+    pub fn units(&self) -> Result<Vec<TrapUnit>, String> {
+        let list: Vec<TrapConfig> = match (&self.trap, self.traps.is_empty()) {
+            (Some(_), false) => return Err("в конфиге одновременно trap и traps — оставьте что-то одно".into()),
+            (None, true) => return Err("в конфиге нет ловушек (traps пуст)".into()),
+            (Some(t), true) => {
+                let mut t = t.clone();
+                if t.token.is_empty() {
+                    t.token = self.token.clone();
+                }
+                vec![t]
+            }
+            (None, false) => self.traps.clone(),
+        };
+
+        let mut seen = std::collections::HashMap::new();
+        let mut out = Vec::with_capacity(list.len());
+        for (i, mut trap) in list.into_iter().enumerate() {
+            let label = trap.label(i);
+            trap.token = trap.token.trim().to_string();
+            if trap.token.is_empty() {
+                return Err(format!("ловушка {label}: не задан token"));
+            }
+            if let Some(prev) = seen.insert(trap.token.clone(), label.clone()) {
+                return Err(format!("ловушки {prev} и {label}: одинаковый token"));
+            }
+            if trap.server_pub_key.is_empty() {
+                trap.server_pub_key = self.server_pub_key.clone();
+            }
+            // Ключ хоста SSH должен переживать перезапуск: выводим его из токена ловушки.
+            trap.key_seed = trap.token.clone();
+
+            let mut sender = self.clone();
+            sender.token = trap.token.clone();
+            sender.server_pub_key = trap.server_pub_key.clone();
+            sender.trap = None;
+            sender.traps = Vec::new();
+            out.push(TrapUnit { trap, sender });
+        }
+        Ok(out)
+    }
+
     pub fn ingest_url(&self) -> String {
         format!("{}/api/ingest", self.center_url.trim_end_matches('/'))
     }
@@ -232,6 +308,84 @@ mod tests {
         assert_eq!(cfg.stealth_paths, vec!["/custom/path".to_string()]);
         assert_eq!(cfg.buffer_path, Some("/var/log/custom.dat".to_string()));
         assert_eq!(cfg.jitter_s, 5);
+    }
+
+    fn parse(v: serde_json::Value) -> Config {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn units_legacy_single_trap_takes_root_token_and_key() {
+        let cfg = parse(serde_json::json!({
+            "center_url": "http://c:8080",
+            "token": "tok-legacy",
+            "server_pub_key": "aa",
+            "trap": { "class": "banner", "port": 2222 }
+        }));
+        let units = cfg.units().unwrap();
+        assert_eq!(units.len(), 1);
+        let u = &units[0];
+        assert_eq!(u.trap.token, "tok-legacy");
+        assert_eq!(u.trap.server_pub_key, "aa");
+        assert_eq!(u.trap.key_seed, "tok-legacy", "ключ хоста SSH выводится из токена");
+        assert_eq!(u.sender.token, "tok-legacy");
+        assert_eq!(u.sender.server_pub_key, "aa");
+        assert_eq!(u.sender.center_url, "http://c:8080");
+    }
+
+    #[test]
+    fn units_multi_each_trap_sends_with_own_token_and_key() {
+        let cfg = parse(serde_json::json!({
+            "center_url": "http://c:8080",
+            "transport": "udp_burst",
+            "jitter_s": 3,
+            "server_pub_key": "root-key",
+            "traps": [
+                { "token": "t1", "server_pub_key": "k1", "name": "SSH", "class": "ssh", "port": 2222 },
+                { "token": " t2 ", "class": "banner", "port": 21 }
+            ]
+        }));
+        let units = cfg.units().unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].sender.token, "t1");
+        assert_eq!(units[0].sender.server_pub_key, "k1");
+        assert_eq!(units[0].trap.key_seed, "t1");
+        // пробелы вокруг токена отбрасываются; пустой ключ — из корня конфига
+        assert_eq!(units[1].sender.token, "t2");
+        assert_eq!(units[1].sender.server_pub_key, "root-key");
+        // общие настройки доставки наследуются
+        for u in &units {
+            assert_eq!(u.sender.transport, "udp_burst");
+            assert_eq!(u.sender.jitter_s, 3);
+            assert!(u.sender.traps.is_empty() && u.sender.trap.is_none());
+        }
+    }
+
+    #[test]
+    fn units_rejects_bad_configs() {
+        let cases = [
+            (serde_json::json!({ "center_url": "x" }), "нет ловушек"),
+            (serde_json::json!({ "center_url": "x", "traps": [] }), "нет ловушек"),
+            (
+                serde_json::json!({ "center_url": "x", "token": "a",
+                    "trap": { "class": "banner" }, "traps": [{ "token": "b", "class": "banner" }] }),
+                "одновременно",
+            ),
+            (serde_json::json!({ "center_url": "x", "trap": { "class": "banner" } }), "не задан token"),
+            (
+                serde_json::json!({ "center_url": "x", "traps": [{ "name": "FTP", "token": "  ", "class": "dialog" }] }),
+                "«FTP»: не задан token",
+            ),
+            (
+                serde_json::json!({ "center_url": "x", "traps": [
+                    { "token": "same", "class": "banner" }, { "token": "same", "class": "dialog" }] }),
+                "одинаковый token",
+            ),
+        ];
+        for (v, want) in cases {
+            let err = parse(v.clone()).units().unwrap_err();
+            assert!(err.contains(want), "{v}: ждали «{want}», получили «{err}»");
+        }
     }
 
     #[test]

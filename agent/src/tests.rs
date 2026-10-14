@@ -448,3 +448,152 @@ fn ssh_host_key_is_stable_per_seed() {
 fn ssh_rejects_bad_version() {
     assert!(Trap::build(&trap_cfg("ssh", &json!({ "version": "OpenSSH_8.9" }))).is_err());
 }
+
+// ----------------------------- несколько ловушек в одном агенте -----------------------------
+
+fn host_units(traps: Value) -> Vec<crate::runtime::Unit> {
+    let cfg: crate::config::Config =
+        serde_json::from_value(json!({ "center_url": "http://127.0.0.1:1", "traps": traps })).unwrap();
+    crate::runtime::build_units(cfg.units().unwrap()).unwrap()
+}
+
+/// Свободный TCP-порт на loopback (сразу освобождаем — гонка в тестах приемлема).
+async fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port()
+}
+
+#[tokio::test]
+async fn runtime_serves_each_trap_with_its_own_sink() {
+    let (p1, p2) = (free_port().await, free_port().await);
+    let units = host_units(json!([
+        { "token": "t-ssh", "name": "A", "class": "banner", "bind": "127.0.0.1", "port": p1,
+          "params": { "banner": "AAA\\r\\n", "close_after_input": true } },
+        { "token": "t-ftp", "name": "B", "class": "banner", "bind": "127.0.0.1", "port": p2,
+          "params": { "banner": "BBB\\r\\n", "close_after_input": true } }
+    ]));
+    let bound = crate::runtime::bind_all(&units).await.unwrap();
+    assert_eq!(bound.len(), 2);
+    let (s1, r1) = EventSink::test_sink();
+    let (s2, r2) = EventSink::test_sink();
+    let handles = crate::runtime::serve(&units, bound, &[s1, s2]);
+
+    for (port, want) in [(p1, "AAA"), (p2, "BBB")] {
+        let mut c = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        c.write_all(b"hello\r\n").await.unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(2), c.read_to_end(&mut buf)).await;
+        assert!(String::from_utf8_lossy(&buf).starts_with(want), "порт {port}: {buf:?}");
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for h in handles {
+        h.abort();
+    }
+
+    // События каждой ловушки ушли только в её канал (а значит, в центр под её токеном).
+    let (e1, e2) = (drain(r1), drain(r2));
+    assert!(has_type(&e1, "connect").is_some() && has_type(&e2, "connect").is_some());
+    assert!(e1.iter().all(|e| e.dst_port == p1), "{e1:?}");
+    assert!(e2.iter().all(|e| e.dst_port == p2), "{e2:?}");
+}
+
+#[tokio::test]
+async fn runtime_ssh_host_key_follows_trap_token() {
+    let units = host_units(json!([
+        { "token": "tok-1", "class": "ssh", "port": 1 },
+        { "token": "tok-2", "class": "ssh", "port": 2 }
+    ]));
+    let fp = |i: usize| match &*units[i].trap {
+        Trap::Ssh(t) => t.host_fingerprint(),
+        _ => unreachable!(),
+    };
+    let solo = crate::traps::ssh::SshTrap::new(&json!({}), "tok-1").unwrap();
+    assert_eq!(fp(0), solo.host_fingerprint(), "ключ тот же, что у ловушки с этим токеном отдельно");
+    assert_ne!(fp(0), fp(1), "у разных ловушек разные ключи хоста");
+}
+
+#[test]
+fn runtime_rejects_port_clash_but_allows_tcp_and_udp_on_same_number() {
+    let cfg = |traps: Value| -> crate::config::Config {
+        serde_json::from_value(json!({ "center_url": "x", "traps": traps })).unwrap()
+    };
+    let err = crate::runtime::build_units(
+        cfg(json!([
+            { "token": "a", "name": "SSH", "class": "ssh", "port": 2222 },
+            { "token": "b", "name": "Shell", "class": "high_interaction", "port": 2222 }
+        ]))
+        .units()
+        .unwrap(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("2222/tcp") && err.contains("«SSH»") && err.contains("«Shell»"), "{err}");
+
+    // Порт внутри диапазона многопортовой ловушки — тоже конфликт.
+    let err = crate::runtime::build_units(
+        cfg(json!([
+            { "token": "a", "class": "port_listener", "ports": "9000-9005" },
+            { "token": "b", "class": "banner", "port": 9003 }
+        ]))
+        .units()
+        .unwrap(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("9003/tcp"), "{err}");
+
+    // 53/tcp и 53/udp — разные сокеты.
+    let units = crate::runtime::build_units(
+        cfg(json!([
+            { "token": "a", "class": "udp", "port": 5353 },
+            { "token": "b", "class": "banner", "port": 5353 }
+        ]))
+        .units()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(units.len(), 2);
+
+    // Ошибка сборки ловушки называет, какая именно сломана.
+    let err = crate::runtime::build_units(
+        cfg(json!([{ "token": "a", "name": "Bad", "class": "nope", "port": 1 }])).units().unwrap(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("«Bad»") && err.contains("неизвестный класс"), "{err}");
+}
+
+#[tokio::test]
+async fn runtime_bind_reports_every_busy_port_and_starts_nothing() {
+    let busy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let busy_port = busy.local_addr().unwrap().port();
+    let free = free_port().await;
+    let units = host_units(json!([
+        { "token": "a", "name": "Free", "class": "banner", "bind": "127.0.0.1", "port": free },
+        { "token": "b", "name": "Busy", "class": "banner", "bind": "127.0.0.1", "port": busy_port }
+    ]));
+    let errors = match crate::runtime::bind_all(&units).await {
+        Ok(_) => panic!("занятый порт должен быть ошибкой"),
+        Err(e) => e,
+    };
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("«Busy»") && errors[0].contains(&format!(":{busy_port}/tcp")), "{errors:?}");
+    // Свободный порт тоже отпущен: агент не держит ничего, раз не стартует.
+    TcpListener::bind(("127.0.0.1", free)).await.expect("порт свободной ловушки должен освободиться");
+}
+
+#[test]
+fn runtime_buffer_files_are_per_trap() {
+    use crate::runtime::buffer_path_for;
+    use std::path::Path;
+    let base = Path::new("/var/tmp/honeyforge-agent-buffer.dat");
+    assert_eq!(buffer_path_for(base, "tok-a", false), base, "одна ловушка — прежний путь");
+    let a = buffer_path_for(base, "tok-a", true);
+    let b = buffer_path_for(base, "tok-b", true);
+    assert_ne!(a, b);
+    assert_eq!(a.parent(), base.parent());
+    let name = a.file_name().unwrap().to_str().unwrap();
+    assert!(name.starts_with("honeyforge-agent-buffer-") && name.ends_with(".dat"), "{name}");
+    assert_eq!(a, buffer_path_for(base, "tok-a", true), "путь стабилен между запусками");
+    let no_ext = buffer_path_for(Path::new("/tmp/buf"), "tok-a", true);
+    assert!(no_ext.to_str().unwrap().starts_with("/tmp/buf-"));
+}
