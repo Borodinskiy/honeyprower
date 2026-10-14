@@ -26,9 +26,17 @@ func main() {
 	cfg := config.Load()
 
 	// ---------- Database ----------
-	store, err := storage.NewPostgres(context.Background(), cfg.DBDSN)
+	var store storage.Storage
+	var closeStore func() error
+	pgStore, err := storage.NewPostgres(context.Background(), cfg.DBDSN)
 	if err != nil {
-		log.Fatalf("failed to initialize postgres storage: %v", err)
+		log.Printf("failed to initialize postgres storage (%v), falling back to in-memory store", err)
+		memStore := storage.NewInMemory()
+		storage.Seed(memStore)
+		store = memStore
+	} else {
+		store = pgStore
+		closeStore = pgStore.Close
 	}
 
 	authMgr := auth.NewManager()
@@ -100,7 +108,9 @@ func main() {
 	_ = webSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
 	cancel()
-	_ = store.Close()
+	if closeStore != nil {
+		_ = closeStore()
+	}
 	log.Println("'Bye")
 	os.Exit(exitCode)
 }
