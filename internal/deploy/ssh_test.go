@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -337,6 +338,7 @@ func TestDeploy_RootSuccess(t *testing.T) {
 		"mv /tmp/hf_agent_svc /etc/systemd/system/honeyforge-agent.service && chmod 0644 /etc/systemd/system/honeyforge-agent.service",
 		activateCmd,
 		verifyCmd,
+		saveGoodCmd,
 	}
 
 	if len(server.commands) != len(expectedCommands) {
@@ -405,13 +407,13 @@ func TestDeploy_SudoSuccess(t *testing.T) {
 			sudoCmdCount++
 		}
 	}
-	if sudoCmdCount != 5 {
-		t.Errorf("expected 5 sudo commands (install bin, install cfg, install svc, systemctl, verify), got %d: %v", sudoCmdCount, server.commands)
+	if sudoCmdCount != 6 {
+		t.Errorf("expected 6 sudo commands (install bin, install cfg, install svc, systemctl, verify, save good), got %d: %v", sudoCmdCount, server.commands)
 	}
 
 	// Verify the sudo password passed on stdin
-	if len(server.sudoPasswords) != 5 {
-		t.Fatalf("expected 5 sudo password prompts, got %d", len(server.sudoPasswords))
+	if len(server.sudoPasswords) != 6 {
+		t.Fatalf("expected 6 sudo password prompts, got %d", len(server.sudoPasswords))
 	}
 	for i, pass := range server.sudoPasswords {
 		if pass != "rootpassword123" {
@@ -688,7 +690,7 @@ func TestDeploy_Errors(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected verification error, got nil")
 		}
-		if !strings.Contains(err.Error(), "is not running") || !strings.Contains(err.Error(), "216/GROUP") {
+		if !strings.Contains(err.Error(), "agent failed to start") || !strings.Contains(err.Error(), "216/GROUP") {
 			t.Errorf("expected not-running error with journal, got: %v", err)
 		}
 	})
@@ -1171,4 +1173,104 @@ func TestUndeploy_Errors(t *testing.T) {
 			t.Errorf("expected rm error, got %v", err)
 		}
 	})
+}
+
+// Обновление, после которого агент не стартует, не должно оставлять хост без ловушек.
+func TestDeploy_FailedStartRollsBack(t *testing.T) {
+	bin := createTestBinary(t, []byte("agent"))
+	cases := []struct {
+		name         string
+		rollbackOut  string
+		rollbackFail string
+		want         string
+		stopped      bool
+	}{
+		{"previous version restored", "restored\n", "", "previous version restored", false},
+		{"nothing to restore", "stopped\n", "", "agent stopped: no previous working version to restore", true},
+		{"restored version fails too", "restore-failed\n", "", "agent stopped: previous version did not start either", true},
+		{"rollback itself fails", "", "cp: cannot stat", "rollback failed", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			server := newMockSSHServer(t)
+			server.allowedUsers["root"] = "pw"
+			server.mu.Lock()
+			// Вывод самого агента из journalctl — причина, которую увидит оператор.
+			server.failCommands[verifyCmd] = "ловушка «SSH»: не удалось открыть 0.0.0.0:22/tcp: Address already in use (os error 98)\n"
+			if c.rollbackOut != "" {
+				server.cmdOutputs[rollbackCmd] = c.rollbackOut
+			}
+			if c.rollbackFail != "" {
+				server.failCommands[rollbackCmd] = c.rollbackFail
+			}
+			server.mu.Unlock()
+
+			d := NewSSHDeployer()
+			d.Timeout = 5 * time.Second
+			err := d.Deploy(context.Background(), TargetConfig{Host: "127.0.0.1", Port: server.port, Username: "root", Password: "pw"}, Payload{BinaryPath: bin})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, "agent failed to start:\n") || !strings.Contains(msg, "0.0.0.0:22/tcp: Address already in use") || !strings.Contains(msg, c.want) {
+				t.Fatalf("error: %q", msg)
+			}
+			if errors.Is(err, ErrAgentStopped) != c.stopped {
+				t.Fatalf("errors.Is(ErrAgentStopped) = %v, want %v", !c.stopped, c.stopped)
+			}
+			// Ошибка не тащит за собой текст shell-команд — только вывод агента и итог отката.
+			if strings.Contains(msg, "journalctl") || strings.Contains(msg, "sudo") {
+				t.Fatalf("error leaks the command line: %q", msg)
+			}
+
+			server.mu.Lock()
+			defer server.mu.Unlock()
+			n := len(server.commands)
+			if n < 2 || server.commands[n-2] != verifyCmd || server.commands[n-1] != rollbackCmd {
+				t.Fatalf("want verify then rollback last, got %v", server.commands)
+			}
+			for _, cmd := range server.commands {
+				if cmd == saveGoodCmd {
+					t.Fatal("a failed version must not become the last good one")
+				}
+			}
+		})
+	}
+}
+
+func TestDeploy_FailedActivationRollsBack(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	server.mu.Lock()
+	server.failCommands[activateCmd] = "Failed to restart honeyforge-agent.service: Unit not found."
+	server.cmdOutputs[rollbackCmd] = "restored\n"
+	server.mu.Unlock()
+
+	d := NewSSHDeployer()
+	d.Timeout = 5 * time.Second
+	err := d.Deploy(context.Background(), TargetConfig{Host: "127.0.0.1", Port: server.port, Username: "root", Password: "pw"},
+		Payload{BinaryPath: createTestBinary(t, []byte("agent"))})
+	if err == nil || !strings.Contains(err.Error(), "Unit not found") || !strings.Contains(err.Error(), "previous version restored") {
+		t.Fatalf("error: %v", err)
+	}
+}
+
+// Команды, которые уходят на сервер, должны быть корректным shell-кодом и после
+// обёртки в sudo bash -c '...' (кавычки в них экранируются).
+func TestDeployCommandsAreValidShell(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not found")
+	}
+	for name, cmd := range map[string]string{
+		"save good": saveGoodCmd, "activate": activateCmd, "verify": verifyCmd,
+		"rollback": rollbackCmd, "remove": removeCmd,
+	} {
+		wrapped := fmt.Sprintf("bash -c '%s'", strings.ReplaceAll(cmd, "'", "'\\''"))
+		for _, script := range []string{cmd, wrapped} {
+			if out, err := exec.Command(bash, "-n", "-c", script).CombinedOutput(); err != nil {
+				t.Errorf("%s: invalid shell (%v): %s\n%s", name, err, out, script)
+			}
+		}
+	}
 }

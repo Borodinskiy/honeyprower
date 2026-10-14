@@ -18,17 +18,45 @@ import (
 
 var _ Deployer = (*SSHDeployer)(nil)
 
+// goodDir keeps the last agent and config that passed verifyCmd, so a failed update can be
+// rolled back. It is written only after a successful check: copying whatever runs before an
+// update could save an agent that is crash-looping (it is briefly "active" between restarts).
+const goodDir = "/var/lib/honeyforge/last-good"
+
 // removeCmd tolerates an absent service (already removed), but not a failed rm (no rights).
 const removeCmd = "systemctl disable --now honeyforge-agent.service >/dev/null 2>&1; " +
 	"rm -f /etc/systemd/system/honeyforge-agent.service /usr/local/bin/honeyforge-agent && " +
-	"rm -rf /etc/honeyforge && systemctl daemon-reload"
+	"rm -rf /etc/honeyforge /var/lib/honeyforge && systemctl daemon-reload"
+
+// saveGoodCmd remembers the agent that has just been verified (replacing the old copy atomically).
+const saveGoodCmd = "rm -rf " + goodDir + ".tmp && mkdir -p " + goodDir + ".tmp && " +
+	"cp -p /usr/local/bin/honeyforge-agent /etc/honeyforge/config.json " + goodDir + ".tmp/ && " +
+	"rm -rf " + goodDir + " && mv " + goodDir + ".tmp " + goodDir
+
+// rollbackCmd brings back the last good agent and prints "restored". Without one, or if it does
+// not start either, it stops the service so it does not crash-loop and prints "stopped" or
+// "restore-failed". The binary is replaced by rename: copying over a file that is being
+// executed fails with "Text file busy".
+const rollbackCmd = "systemctl stop honeyforge-agent.service; r=stopped; if [ -f " + goodDir + "/honeyforge-agent ]; then " +
+	"cp -p " + goodDir + "/honeyforge-agent /usr/local/bin/honeyforge-agent.new && " +
+	"mv -f /usr/local/bin/honeyforge-agent.new /usr/local/bin/honeyforge-agent && " +
+	"cp -p " + goodDir + "/config.json /etc/honeyforge/config.json && " +
+	"{ if command -v restorecon >/dev/null 2>&1; then restorecon -F /usr/local/bin/honeyforge-agent /etc/honeyforge/config.json; fi; } && " +
+	"systemctl start honeyforge-agent.service && sleep 2 && systemctl is-active --quiet honeyforge-agent.service && { echo restored; exit 0; }; " +
+	"r=restore-failed; fi; systemctl disable --now honeyforge-agent.service >/dev/null 2>&1; echo $r"
 
 // activateCmd resets SELinux labels first: files moved from /tmp keep user_tmp_t and systemd refuses to exec them (203/EXEC).
 const activateCmd = "if command -v restorecon >/dev/null 2>&1; then restorecon -F /usr/local/bin/honeyforge-agent /etc/honeyforge/config.json /etc/systemd/system/honeyforge-agent.service; fi; " +
 	"systemctl daemon-reload && systemctl enable honeyforge-agent.service && systemctl restart honeyforge-agent.service"
 
-// verifyCmd waits for the agent to settle and prints its journal tail to stderr when it is not active.
-const verifyCmd = "sleep 3; systemctl is-active --quiet honeyforge-agent.service || { journalctl -u honeyforge-agent.service -n 15 --no-pager >&2; exit 1; }"
+// verifyCmd waits for the agent to settle. If it is not active, prints to stderr what the agent
+// itself wrote in its last start (e.g. which port is busy) or, when the agent never got to run
+// (bad user, SELinux), the unit's journal tail.
+const verifyCmd = "sleep 3; systemctl is-active --quiet honeyforge-agent.service && exit 0; " +
+	"id=$(systemctl show -p InvocationID --value honeyforge-agent.service); " +
+	"out=$(if [ -n \"$id\" ]; then journalctl -o cat --no-pager _SYSTEMD_INVOCATION_ID=$id; fi); " +
+	"[ -n \"$out\" ] || out=$(journalctl -u honeyforge-agent.service -n 15 --no-pager -o cat); " +
+	"printf '%s\\n' \"$out\" >&2; exit 1"
 
 // SSHDeployer implements Deployer over SSH.
 type SSHDeployer struct {
@@ -125,18 +153,23 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	activationCmd := activateCmd
-	if err := d.runCommand(client, target, activationCmd); err != nil {
-		return fmt.Errorf("failed to activate honeyforge-agent service: %w", err)
+	if err := d.runCommand(client, target, activateCmd); err != nil {
+		return d.rollback(client, target, fmt.Errorf("failed to activate honeyforge-agent service: %w", err))
 	}
 
 	// 5. Make sure the agent stays up: a crash on start is otherwise invisible.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := d.runCommand(client, target, verifyCmd); err != nil {
-		return fmt.Errorf("honeyforge-agent service is not running: %w", err)
+	_, journal, code, err := d.runCommandWithOutput(client, target, verifyCmd)
+	if err != nil {
+		return fmt.Errorf("failed to check honeyforge-agent service: %w", err)
 	}
+	if code != 0 {
+		return d.rollback(client, target, fmt.Errorf("agent failed to start:\n%s", strings.TrimSpace(journal)))
+	}
+	// Best effort: without the copy a later failed update can only stop the service.
+	_ = d.runCommand(client, target, saveGoodCmd)
 
 	// Post-install health check (if enabled)
 	if d.CheckHealth || target.CheckHealth {
@@ -146,6 +179,26 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 	}
 
 	return nil
+}
+
+// rollback returns the host to the last good agent after a failed update and adds the outcome
+// to cause. If the agent ended up stopped, the error wraps ErrAgentStopped.
+func (d *SSHDeployer) rollback(client *ssh.Client, target TargetConfig, cause error) error {
+	out, stderr, code, err := d.runCommandWithOutput(client, target, rollbackCmd)
+	out = strings.TrimSpace(out)
+	switch {
+	case err == nil && code == 0 && out == "restored":
+		return fmt.Errorf("%w\nprevious version restored", cause)
+	case err == nil && code == 0 && out == "stopped":
+		return fmt.Errorf("%w\n%w: no previous working version to restore", cause, ErrAgentStopped)
+	case err == nil && code == 0 && out == "restore-failed":
+		return fmt.Errorf("%w\n%w: previous version did not start either", cause, ErrAgentStopped)
+	default:
+		if err == nil {
+			err = fmt.Errorf("exit status %d", code)
+		}
+		return fmt.Errorf("%w\nrollback failed: %v %s", cause, err, strings.TrimSpace(stderr))
+	}
 }
 
 // Status checks service status using systemctl and bound ports using ss/netstat.

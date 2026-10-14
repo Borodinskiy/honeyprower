@@ -3,7 +3,12 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
+
+// ErrAgentStopped: an update failed and the agent on the host is now stopped (there was no
+// working version to roll back to). The host no longer runs any traps.
+var ErrAgentStopped = errors.New("agent stopped")
 
 // TargetConfig specifies the parameters required to connect to a target host
 // via SSH and perform privileged installation tasks.
