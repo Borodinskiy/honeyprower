@@ -6,6 +6,7 @@ package handlers
 
 import (
 	"honeyprower/internal/auth"
+	"honeyprower/internal/deploy"
 	"honeyprower/internal/storage"
 )
 
@@ -16,6 +17,7 @@ type Handlers struct {
 	AllowRegistration bool
 	// PublicURL — внешний адрес центра для агентов (в config.json). Пусто — берётся из запроса.
 	PublicURL string
+	Deployer  deploy.Deployer
 }
 
 // Создаёт структуру обработчиков, передавая ей доступ к базе данных и менеджеру авторизации
