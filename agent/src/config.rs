@@ -58,6 +58,50 @@ pub struct TrapConfig {
     pub params: Value,
 }
 
+impl TrapConfig {
+    /// Рекомендуемый порт по умолчанию для каждого класса ловушек.
+    pub fn default_port_for_class(class: &str) -> u16 {
+        match class {
+            "banner" => 22,
+            "dialog" => 21,
+            "http" => 80,
+            "tarpit" => 80,
+            "honeytoken" => 80,
+            "udp" => 53,
+            "iec104" => 2404,
+            "scada" => 502,
+            "high_interaction" => 22,
+            "low_extra" => 1900,
+            "medium_extra" => 6379,
+            _ => 0,
+        }
+    }
+
+    /// Рекомендуемый порт ловушки с учётом конфигурации параметров.
+    pub fn default_port(&self) -> u16 {
+        if self.class == "medium_extra" {
+            let mode = Params(&self.params).str("mode", "auto");
+            if mode == "mqtt" {
+                return 1883;
+            } else if mode == "redis" {
+                return 6379;
+            }
+        }
+        Self::default_port_for_class(&self.class)
+    }
+
+    /// Фактический порт: если задан явно (ненулевой), возвращается он,
+    /// иначе используется рекомендованный порт по умолчанию.
+    pub fn effective_port(&self) -> u16 {
+        if self.port != 0 {
+            self.port
+        } else {
+            self.default_port()
+        }
+    }
+}
+
+
 fn default_true() -> bool {
     true
 }
@@ -184,5 +228,30 @@ mod tests {
         assert_eq!(cfg.stealth_paths, vec!["/custom/path".to_string()]);
         assert_eq!(cfg.buffer_path, Some("/var/log/custom.dat".to_string()));
         assert_eq!(cfg.jitter_s, 5);
+    }
+
+    #[test]
+    fn test_trap_config_default_ports() {
+        assert_eq!(TrapConfig::default_port_for_class("banner"), 22);
+        assert_eq!(TrapConfig::default_port_for_class("dialog"), 21);
+        assert_eq!(TrapConfig::default_port_for_class("http"), 80);
+        assert_eq!(TrapConfig::default_port_for_class("iec104"), 2404);
+        assert_eq!(TrapConfig::default_port_for_class("scada"), 502);
+        assert_eq!(TrapConfig::default_port_for_class("high_interaction"), 22);
+        assert_eq!(TrapConfig::default_port_for_class("low_extra"), 1900);
+        assert_eq!(TrapConfig::default_port_for_class("medium_extra"), 6379);
+
+        let cfg_mqtt: TrapConfig = serde_json::from_value(serde_json::json!({
+            "class": "medium_extra",
+            "params": { "mode": "mqtt" }
+        })).unwrap();
+        assert_eq!(cfg_mqtt.default_port(), 1883);
+        assert_eq!(cfg_mqtt.effective_port(), 1883);
+
+        let cfg_custom: TrapConfig = serde_json::from_value(serde_json::json!({
+            "class": "iec104",
+            "port": 12404
+        })).unwrap();
+        assert_eq!(cfg_custom.effective_port(), 12404);
     }
 }

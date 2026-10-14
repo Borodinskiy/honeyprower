@@ -274,3 +274,115 @@ async fn udp_dns_answers_a_query() {
     let data = has_type(&evs, "data").expect("нет события data");
     assert_eq!(data.data["qname"], "example.com");
 }
+
+// ----------------------------- e2e tests -----------------------------
+
+#[tokio::test]
+async fn e2e_iec104_trap_activation_and_interrogation() {
+    let (recv, evs) = run_tcp_script("iec104", json!({}), |mut client| async move {
+        // 1. Send STARTDT_ACT (0x68 0x04 0x07 0x00 0x00 0x00)
+        let startdt_act = [0x68, 0x04, 0x07, 0x00, 0x00, 0x00];
+        client.write_all(&startdt_act).await.unwrap();
+
+        // Receive STARTDT_CON (0x68 0x04 0x0B 0x00 0x00 0x00)
+        let mut con_buf = vec![0u8; 6];
+        client.read_exact(&mut con_buf).await.unwrap();
+        assert_eq!(&con_buf, &[0x68, 0x04, 0x0B, 0x00, 0x00, 0x00]);
+
+        // 2. Send C_IC_NA_1 interrogation command:
+        // APCI: I frame (ns: 0, nr: 0) -> [0x00, 0x00, 0x00, 0x00]
+        // ASDU: type 100 (0x64), vsq 1, cot 6, originator 0, coa 1, payload [0, 0, 0, 20]
+        let interrogation = [
+            0x68, 0x0e, // Start 0x68, length 14
+            0x00, 0x00, 0x00, 0x00, // APCI I(0, 0)
+            0x64, 0x01, 0x06, 0x00, 0x01, 0x00, // ASDU: C_IC_NA_1, COT=6, COA=1
+            0x00, 0x00, 0x00, 0x14, // IOA=0, QOI=20
+        ];
+        client.write_all(&interrogation).await.unwrap();
+
+        let mut resp_buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(500), client.read_to_end(&mut resp_buf)).await;
+
+        let mut all = con_buf;
+        all.extend_from_slice(&resp_buf);
+        all
+    })
+    .await;
+
+    // Verify response contains STARTDT_CON followed by interrogation responses
+    assert!(recv.starts_with(&[0x68, 0x04, 0x0B, 0x00, 0x00, 0x00]));
+    assert!(recv.len() > 6);
+    // Verifies received events
+    assert!(has_type(&evs, "connect").is_some());
+    assert!(has_type(&evs, "disconnect").is_some());
+}
+
+#[tokio::test]
+async fn e2e_scada_modbus_read_holding_registers() {
+    let req = [
+        0x00, 0x01, // Transaction ID: 1
+        0x00, 0x00, // Protocol ID: 0 (Modbus TCP)
+        0x00, 0x06, // Length: 6 bytes following
+        0x01,       // Unit ID: 1
+        0x03,       // Function Code: 3 (Read Holding Registers)
+        0x00, 0x00, // Starting Address: 0
+        0x00, 0x02, // Quantity of Registers: 2
+    ];
+    let (recv, evs) = run_tcp("scada", json!({}), &req).await;
+
+    // Verify response
+    assert!(recv.len() >= 13);
+    assert_eq!(&recv[0..2], &[0x00, 0x01]); // tx_id
+    assert_eq!(&recv[2..4], &[0x00, 0x00]); // proto_id
+    assert_eq!(&recv[4..6], &[0x00, 0x07]); // length = 7 (unit_id 1 + pdu 6)
+    assert_eq!(recv[6], 1);                 // unit_id
+    assert_eq!(recv[7], 0x03);              // fc
+    assert_eq!(recv[8], 4);                 // byte count (2 registers * 2 bytes)
+    assert_eq!(&recv[9..11], &22000u16.to_be_bytes()); // reg 0
+    assert_eq!(&recv[11..13], &1500u16.to_be_bytes());  // reg 1
+
+    // Verify events
+    let req_ev = has_type(&evs, "request").expect("нет события request");
+    assert_eq!(req_ev.data["protocol"], "modbus_tcp");
+    assert_eq!(req_ev.data["function_code"], 3);
+    assert_eq!(req_ev.data["address"], 0);
+    assert_eq!(req_ev.data["quantity"], 2);
+    assert_eq!(req_ev.data["unit_id"], 1);
+    assert!(has_type(&evs, "connect").is_some());
+    assert!(has_type(&evs, "disconnect").is_some());
+}
+
+#[tokio::test]
+async fn e2e_high_interaction_vfs_and_tokens() {
+    let (recv, evs) = run_tcp("high_interaction", json!({}), b"cat /root/.env\r\nexit\r\n").await;
+    let text = String::from_utf8_lossy(&recv);
+    assert!(text.contains("API_KEY="));
+
+    // Verify that honeytoken alert event was captured
+    let token_ev = has_type(&evs, "token").expect("нет события token");
+    assert_eq!(token_ev.data["token_file"], "/root/.env");
+    assert_eq!(token_ev.data["severity"], "CRITICAL");
+    assert_eq!(token_ev.data["message"], "Honeytoken accessed by attacker");
+
+    assert!(has_type(&evs, "honeytoken_hit").is_some());
+    assert!(has_type(&evs, "command").is_some());
+    assert!(has_type(&evs, "connect").is_some());
+    assert!(has_type(&evs, "disconnect").is_some());
+}
+
+#[tokio::test]
+async fn e2e_extra_traps() {
+    // starts medium_extra, sends Redis PING\r\n, receives +PONG\r\n
+    let (recv, evs) = run_tcp("medium_extra", json!({ "mode": "redis" }), b"PING\r\n").await;
+    assert_eq!(recv, b"+PONG\r\n");
+
+    let cmd_ev = has_type(&evs, "command").expect("нет события command");
+    assert_eq!(cmd_ev.data["command"], "PING");
+    assert_eq!(cmd_ev.data["proto"], "redis");
+
+    // Also verify low_extra trap
+    let (recv_low, evs_low) = run_tcp("low_extra", json!({ "mode": "echo" }), b"PING_ECHO\r\n").await;
+    assert_eq!(recv_low, b"PING_ECHO\r\n");
+    let scan_ev = has_type(&evs_low, "scan").expect("нет события scan");
+    assert_eq!(scan_ev.data["probe_signature"], "echo_probe");
+}
