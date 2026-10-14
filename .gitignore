@@ -3,6 +3,4 @@ data
 tmp
 honeyprower
 .agy-model-router/
-honeyforge-server
-credentials.txt
-honeyforge-deploy.tar.gz
+.env
