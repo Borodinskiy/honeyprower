@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -478,3 +479,377 @@ func TestStealthInvalidEnvelopes(t *testing.T) {
 		t.Fatalf("handler must return 204 for nil body, got %d", w.Code)
 	}
 }
+
+func TestStealth_AntiReplay(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewInMemory()
+	authMgr := auth.NewManager()
+
+	token := "trap-antireplay-token-12345"
+	keyID, pubHex, privHex, err := GenerateTrapCrypto(token)
+	if err != nil {
+		t.Fatalf("GenerateTrapCrypto: %v", err)
+	}
+
+	trap, err := mem.CreateTrap(ctx, models.TrapCreate{
+		Name:    "AntiReplay Trap",
+		Class:   "banner",
+		Port:    2222,
+		KeyID:   keyID,
+		PubKey:  pubHex,
+		PrivKey: privHex,
+		Enabled: true,
+	}, token)
+	if err != nil {
+		t.Fatalf("CreateTrap: %v", err)
+	}
+	trap.KeyID = keyID
+	trap.PubKey = pubHex
+	trap.PrivKey = privHex
+	setTrapKeys(mem, trap.ID, keyID, pubHex, privHex)
+	store := ensureTrapStorage(mem, trap)
+	h := New(store, authMgr)
+
+	testEvent := models.IngestEvent{
+		TrapClass: "banner",
+		EventType: "auth_failed",
+		Proto:     "tcp",
+		SrcIP:     "192.168.1.100",
+		SrcPort:   54321,
+		DstPort:   2222,
+		Session:   "sess-replay-001",
+	}
+
+	envelope := sealTestEnvelope(t, pubHex, token, "ingest", []models.IngestEvent{testEvent})
+
+	// First call via HTTP: succeeds and inserts 1 event
+	req1 := httptest.NewRequest(http.MethodPost, "/api/stealth/ingest", bytes.NewReader(envelope))
+	w1 := httptest.NewRecorder()
+	h.HandleStealthIngest(w1, req1)
+	if w1.Code != http.StatusNoContent {
+		t.Fatalf("first call: expected HTTP 204, got %d", w1.Code)
+	}
+
+	events, err := mem.ListFilterEvents(ctx, models.EventFilter{TrapID: trap.ID})
+	if err != nil {
+		t.Fatalf("ListFilterEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event after first ingest, got %d", len(events))
+	}
+
+	// Second call via HTTP (replay): detects replay, drops processing, returns HTTP 204
+	req2 := httptest.NewRequest(http.MethodPost, "/api/stealth/ingest", bytes.NewReader(envelope))
+	w2 := httptest.NewRecorder()
+	h.HandleStealthIngest(w2, req2)
+	if w2.Code != http.StatusNoContent {
+		t.Fatalf("second call (replay): expected HTTP 204, got %d", w2.Code)
+	}
+
+	// Database events must still be exactly 1 (no duplicate inserted)
+	eventsAfterReplay, err := mem.ListFilterEvents(ctx, models.EventFilter{TrapID: trap.ID})
+	if err != nil {
+		t.Fatalf("ListFilterEvents: %v", err)
+	}
+	if len(eventsAfterReplay) != 1 {
+		t.Fatalf("expected still 1 event after replay, got %d", len(eventsAfterReplay))
+	}
+
+	// Direct call to ProcessStealthEnvelope must detect replay
+	err = h.ProcessStealthEnvelope(ctx, envelope)
+	if err == nil {
+		t.Fatalf("expected replay error from ProcessStealthEnvelope, got nil")
+	}
+	if err.Error() != "replay detected" && !errors.Is(err, ErrReplayDetected) {
+		t.Fatalf("expected 'replay detected' error, got %v", err)
+	}
+}
+
+func TestStealth_Poly1305Tampering(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewInMemory()
+	authMgr := auth.NewManager()
+
+	token := "trap-poly-tamper-token"
+	keyID, pubHex, privHex, err := GenerateTrapCrypto(token)
+	if err != nil {
+		t.Fatalf("GenerateTrapCrypto: %v", err)
+	}
+
+	trap, err := mem.CreateTrap(ctx, models.TrapCreate{
+		Name:    "Poly Tamper Trap",
+		Class:   "banner",
+		Port:    2222,
+		KeyID:   keyID,
+		PubKey:  pubHex,
+		PrivKey: privHex,
+		Enabled: true,
+	}, token)
+	if err != nil {
+		t.Fatalf("CreateTrap: %v", err)
+	}
+	trap.KeyID = keyID
+	trap.PubKey = pubHex
+	trap.PrivKey = privHex
+	setTrapKeys(mem, trap.ID, keyID, pubHex, privHex)
+	store := ensureTrapStorage(mem, trap)
+	h := New(store, authMgr)
+
+	testEvent := models.IngestEvent{
+		TrapClass: "banner",
+		EventType: "auth_failed",
+		Proto:     "tcp",
+		SrcIP:     "10.0.0.5",
+		DstPort:   2222,
+	}
+	envelope := sealTestEnvelope(t, pubHex, token, "ingest", []models.IngestEvent{testEvent})
+
+	// Flip 1 bit in Poly1305 tag (last byte)
+	tamperedTag := make([]byte, len(envelope))
+	copy(tamperedTag, envelope)
+	tamperedTag[len(tamperedTag)-1] ^= 0x01
+
+	// Direct call: authentication fails
+	if err := h.ProcessStealthEnvelope(ctx, tamperedTag); err == nil {
+		t.Fatalf("expected authentication failure for tampered tag, got nil")
+	}
+
+	// HTTP ingest: returns 204 No Content
+	req := httptest.NewRequest(http.MethodPost, "/api/stealth/ingest", bytes.NewReader(tamperedTag))
+	w := httptest.NewRecorder()
+	h.HandleStealthIngest(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected HTTP 204, got %d", w.Code)
+	}
+
+	// Flip 1 bit in ciphertext payload
+	tamperedCipher := make([]byte, len(envelope))
+	copy(tamperedCipher, envelope)
+	tamperedCipher[55] ^= 0x01
+
+	if err := h.ProcessStealthEnvelope(ctx, tamperedCipher); err == nil {
+		t.Fatalf("expected authentication failure for tampered ciphertext, got nil")
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/stealth/ingest", bytes.NewReader(tamperedCipher))
+	w2 := httptest.NewRecorder()
+	h.HandleStealthIngest(w2, req2)
+	if w2.Code != http.StatusNoContent {
+		t.Fatalf("expected HTTP 204, got %d", w2.Code)
+	}
+
+	// Verify zero events inserted into storage
+	events, err := mem.ListFilterEvents(ctx, models.EventFilter{TrapID: trap.ID})
+	if err != nil {
+		t.Fatalf("ListFilterEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events in storage, got %d", len(events))
+	}
+}
+
+func TestStealth_UnknownKeyID(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewInMemory()
+	authMgr := auth.NewManager()
+	h := New(mem, authMgr)
+
+	token := "unknown-key-test-token"
+	_, pubHex, _, err := GenerateTrapCrypto(token)
+	if err != nil {
+		t.Fatalf("GenerateTrapCrypto: %v", err)
+	}
+
+	envelope := sealTestEnvelope(t, pubHex, token, "ingest", []models.IngestEvent{
+		{TrapClass: "banner", EventType: "scan"},
+	})
+
+	// Direct call should return trap not found
+	if err := h.ProcessStealthEnvelope(ctx, envelope); err == nil {
+		t.Fatalf("expected error for unknown key ID, got nil")
+	}
+
+	// HTTP call must return 204 No Content
+	req := httptest.NewRequest(http.MethodPost, "/api/stealth/ingest", bytes.NewReader(envelope))
+	w := httptest.NewRecorder()
+	h.HandleStealthIngest(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected HTTP 204, got %d", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("expected empty response body, got %d bytes", w.Body.Len())
+	}
+
+	events, err := mem.ListFilterEvents(ctx, models.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListFilterEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events in storage, got %d", len(events))
+	}
+}
+
+func TestStealth_CorruptedGzip(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewInMemory()
+	authMgr := auth.NewManager()
+
+	token := "corrupt-gzip-token"
+	keyID, pubHex, privHex, err := GenerateTrapCrypto(token)
+	if err != nil {
+		t.Fatalf("GenerateTrapCrypto: %v", err)
+	}
+
+	trap, err := mem.CreateTrap(ctx, models.TrapCreate{
+		Name:    "Corrupted Gzip Trap",
+		Class:   "banner",
+		Port:    2222,
+		KeyID:   keyID,
+		PubKey:  pubHex,
+		PrivKey: privHex,
+		Enabled: true,
+	}, token)
+	if err != nil {
+		t.Fatalf("CreateTrap: %v", err)
+	}
+	trap.KeyID = keyID
+	trap.PubKey = pubHex
+	trap.PrivKey = privHex
+	setTrapKeys(mem, trap.ID, keyID, pubHex, privHex)
+	store := ensureTrapStorage(mem, trap)
+	h := New(store, authMgr)
+
+	// Build envelope with valid crypto but corrupted (non-gzip) plaintext
+	sha := sha256.Sum256([]byte(token))
+	keyIDBytes := sha[:8]
+
+	serverPubBytes, err := hex.DecodeString(pubHex)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+	serverPub, err := ecdh.X25519().NewPublicKey(serverPubBytes)
+	if err != nil {
+		t.Fatalf("new public key: %v", err)
+	}
+
+	clientPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	clientPubBytes := clientPriv.PublicKey().Bytes()
+
+	shared, err := clientPriv.ECDH(serverPub)
+	if err != nil {
+		t.Fatalf("ecdh: %v", err)
+	}
+	kdf := hkdf.New(sha256.New, shared, keyIDBytes, []byte("honeyforge-envelope-v1"))
+	symKey := make([]byte, 32)
+	if _, err := io.ReadFull(kdf, symKey); err != nil {
+		t.Fatalf("read kdf: %v", err)
+	}
+
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("rand nonce: %v", err)
+	}
+
+	// Non-gzip data encrypted with valid ChaCha20-Poly1305
+	notGzipData := []byte("This is plain text and definitely not valid gzip stream data!")
+	ciphertext, err := encryptChaCha20Poly1305(symKey, nonce, notGzipData)
+	if err != nil {
+		t.Fatalf("encrypt failed: %v", err)
+	}
+
+	var envelope []byte
+	envelope = append(envelope, keyIDBytes...)
+	envelope = append(envelope, clientPubBytes...)
+	envelope = append(envelope, nonce...)
+	envelope = append(envelope, ciphertext...)
+
+	// Direct call: decompression fails
+	err = h.ProcessStealthEnvelope(ctx, envelope)
+	if err == nil {
+		t.Fatalf("expected error for corrupted gzip, got nil")
+	}
+
+	// HTTP call: returns 204 No Content
+	req := httptest.NewRequest(http.MethodPost, "/api/stealth/ingest", bytes.NewReader(envelope))
+	w := httptest.NewRecorder()
+	h.HandleStealthIngest(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected HTTP 204, got %d", w.Code)
+	}
+
+	events, err := mem.ListFilterEvents(ctx, models.EventFilter{TrapID: trap.ID})
+	if err != nil {
+		t.Fatalf("ListFilterEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events in storage, got %d", len(events))
+	}
+}
+
+func TestStealth_TokenMismatch(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewInMemory()
+	authMgr := auth.NewManager()
+
+	realToken := "trap-real-token-12345"
+	keyID, pubHex, privHex, err := GenerateTrapCrypto(realToken)
+	if err != nil {
+		t.Fatalf("GenerateTrapCrypto: %v", err)
+	}
+
+	trap, err := mem.CreateTrap(ctx, models.TrapCreate{
+		Name:    "Token Mismatch Trap",
+		Class:   "banner",
+		Port:    2222,
+		KeyID:   keyID,
+		PubKey:  pubHex,
+		PrivKey: privHex,
+		Enabled: true,
+	}, realToken)
+	if err != nil {
+		t.Fatalf("CreateTrap: %v", err)
+	}
+	trap.KeyID = keyID
+	trap.PubKey = pubHex
+	trap.PrivKey = privHex
+	setTrapKeys(mem, trap.ID, keyID, pubHex, privHex)
+	store := ensureTrapStorage(mem, trap)
+	h := New(store, authMgr)
+
+	// Create envelope with mismatched token inside payload
+	mismatchedEnv := sealTestEnvelope(t, pubHex, "attacker-spoofed-token", "ingest", []models.IngestEvent{
+		{TrapClass: "banner", EventType: "auth_failed"},
+	})
+	// Overwrite envelope's KeyID with the real trap's KeyID so trap lookup succeeds
+	realKeyIDBytes, err := hex.DecodeString(keyID)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+	copy(mismatchedEnv[0:8], realKeyIDBytes)
+
+	// Direct call should return token mismatch error
+	err = h.ProcessStealthEnvelope(ctx, mismatchedEnv)
+	if err == nil {
+		t.Fatalf("expected error for token mismatch, got nil")
+	}
+
+	// HTTP call must return 204 No Content
+	req := httptest.NewRequest(http.MethodPost, "/api/stealth/ingest", bytes.NewReader(mismatchedEnv))
+	w := httptest.NewRecorder()
+	h.HandleStealthIngest(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected HTTP 204, got %d", w.Code)
+	}
+
+	events, err := mem.ListFilterEvents(ctx, models.EventFilter{TrapID: trap.ID})
+	if err != nil {
+		t.Fatalf("ListFilterEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events in storage, got %d", len(events))
+	}
+}
+

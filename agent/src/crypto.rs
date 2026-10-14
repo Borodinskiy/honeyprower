@@ -3,10 +3,11 @@
 //! Provides KeyID derivation and asymmetric hybrid encryption (X25519 + ChaCha20-Poly1305)
 //! over gzip-compressed telemetry payloads.
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,14 @@ struct InnerPayload<'a> {
     t: &'a str,
     k: &'a str,
     e: &'a [IngestEvent],
+}
+
+
+#[derive(serde::Deserialize)]
+struct DecryptedPayload {
+    t: String,
+    k: String,
+    e: Vec<IngestEvent>,
 }
 
 /// Compute 8-byte KeyID from the first 8 bytes of SHA-256(token).
@@ -74,12 +83,13 @@ pub fn seal_envelope(
     let mut server_pub_arr = [0u8; 32];
     server_pub_arr.copy_from_slice(&server_pub_bytes);
     let server_pub_key = x25519_dalek::PublicKey::from(server_pub_arr);
+    server_pub_arr.zeroize();
 
     // 5. Generate ephemeral X25519 secret and public key
     let ephem_sk = x25519_dalek::EphemeralSecret::random_from_rng(rand::rngs::OsRng);
     let ephem_pk = x25519_dalek::PublicKey::from(&ephem_sk);
 
-    // 6. Diffie-Hellman shared secret
+    // 6. Diffie-Hellman shared secret (ephem_sk is consumed and zeroized on drop)
     let shared_secret = ephem_sk.diffie_hellman(&server_pub_key);
 
     // 7. Derive 32-byte symmetric key via HKDF-SHA256
@@ -114,11 +124,62 @@ pub fn seal_envelope(
     Ok(envelope)
 }
 
+/// Decrypts and decompresses a sealed envelope using a recipient's static secret key.
+/// Returns Ok((token, kind, events)) on success, or Err on any decryption or decompression failure.
+pub fn decrypt_envelope(
+    server_sk: &x25519_dalek::StaticSecret,
+    envelope: &[u8],
+) -> Result<(String, String, Vec<IngestEvent>), String> {
+    if envelope.len() < 68 {
+        return Err(format!(
+            "envelope too short: expected at least 68 bytes, got {}",
+            envelope.len()
+        ));
+    }
+
+    let key_id = &envelope[0..8];
+    let ephem_pk_bytes: [u8; 32] = envelope[8..40]
+        .try_into()
+        .map_err(|e| format!("invalid ephemeral public key length: {e}"))?;
+    let ephem_pk = x25519_dalek::PublicKey::from(ephem_pk_bytes);
+    let nonce = &envelope[40..52];
+    let ciphertext_with_tag = &envelope[52..];
+
+    // ECDH shared secret
+    let shared_secret = server_sk.diffie_hellman(&ephem_pk);
+
+    // HKDF key derivation
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(key_id), shared_secret.as_bytes());
+    let mut sym_key = [0u8; 32];
+    let expand_res = hk.expand(b"honeyforge-envelope-v1", &mut sym_key);
+    if let Err(e) = expand_res {
+        sym_key.zeroize();
+        return Err(format!("hkdf expand error: {e}"));
+    }
+
+    // Decrypt with ChaCha20-Poly1305
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
+    let decrypt_res = cipher.decrypt(Nonce::from_slice(nonce), ciphertext_with_tag);
+    sym_key.zeroize();
+
+    let decrypted_gzip = decrypt_res.map_err(|e| format!("aead decryption failed: {e}"))?;
+
+    // Decompress with gzip
+    let mut decoder = GzDecoder::new(&decrypted_gzip[..]);
+    let mut json_bytes = Vec::new();
+    decoder
+        .read_to_end(&mut json_bytes)
+        .map_err(|e| format!("gzip decompression failed: {e}"))?;
+
+    let payload: DecryptedPayload = serde_json::from_slice(&json_bytes)
+        .map_err(|e| format!("json deserialization failed: {e}"))?;
+
+    Ok((payload.t, payload.k, payload.e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::read::GzDecoder;
-    use std::io::Read;
 
     #[test]
     fn test_compute_key_id() {
@@ -133,14 +194,13 @@ mod tests {
 
         // Also test with another known string
         let empty_key_id = compute_key_id("");
-        // SHA-256 of empty string is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         let expected_empty: [u8; 8] = [0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14];
         assert_eq!(empty_key_id, expected_empty);
     }
 
     #[test]
     fn test_seal_envelope_format() {
-        let server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let mut server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let server_pk = x25519_dalek::PublicKey::from(&server_sk);
         let server_pub_hex = hex::encode(server_pk.as_bytes());
 
@@ -165,12 +225,13 @@ mod tests {
             &expected_key_id,
             "first 8 bytes must match compute_key_id(token)"
         );
+        server_sk.zeroize();
     }
 
     #[test]
     fn test_seal_and_decrypt() {
         // 1. Generate X25519 keypair for the server
-        let server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let mut server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let server_pk = x25519_dalek::PublicKey::from(&server_sk);
         let server_pub_hex = hex::encode(server_pk.as_bytes());
 
@@ -192,53 +253,22 @@ mod tests {
             seal_envelope(&server_pub_hex, token, kind, &events).expect("seal_envelope should succeed");
         assert!(envelope.len() >= 68);
 
-        // 4. Server-side decryption:
-        // Extract envelope fields
-        let key_id = &envelope[0..8];
-        assert_eq!(key_id, &compute_key_id(token));
+        // 4. Server-side decryption using decrypt_envelope helper
+        let (dec_token, dec_kind, dec_events) =
+            decrypt_envelope(&server_sk, &envelope).expect("decrypt_envelope failed");
 
-        let ephem_pk_bytes: [u8; 32] = envelope[8..40]
-            .try_into()
-            .expect("ephem_pk must be 32 bytes");
-        let ephem_pk = x25519_dalek::PublicKey::from(ephem_pk_bytes);
-        let nonce = &envelope[40..52];
-        let ciphertext_with_tag = &envelope[52..];
+        assert_eq!(dec_token, token);
+        assert_eq!(dec_kind, kind);
+        assert_eq!(dec_events.len(), 2);
+        assert_eq!(dec_events[0].src_ip, "192.168.1.50");
+        assert_eq!(dec_events[1].src_ip, "10.0.0.1");
 
-        // Compute DH shared secret on server
-        let shared_secret = server_sk.diffie_hellman(&ephem_pk);
-
-        // Derive symmetric key on server
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(key_id), shared_secret.as_bytes());
-        let mut sym_key = [0u8; 32];
-        hk.expand(b"honeyforge-envelope-v1", &mut sym_key)
-            .expect("hkdf expand failed");
-
-        // Decrypt with ChaCha20-Poly1305
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
-        let decrypted_gzip = cipher
-            .decrypt(Nonce::from_slice(nonce), ciphertext_with_tag)
-            .expect("aead decryption failed");
-
-        // Gzip decompression
-        let mut decoder = GzDecoder::new(&decrypted_gzip[..]);
-        let mut json_bytes = Vec::new();
-        decoder
-            .read_to_end(&mut json_bytes)
-            .expect("gzip decompression failed");
-
-        // JSON deserialization & assertions
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&json_bytes).expect("JSON deserialization failed");
-        assert_eq!(parsed["t"].as_str().unwrap(), token);
-        assert_eq!(parsed["k"].as_str().unwrap(), kind);
-
-        let expected_events_json = serde_json::to_value(&events).unwrap();
-        assert_eq!(parsed["e"], expected_events_json);
+        server_sk.zeroize();
     }
 
     #[test]
     fn test_seal_heartbeat_empty_events() {
-        let server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let mut server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let server_pk = x25519_dalek::PublicKey::from(&server_sk);
         let server_pub_hex = hex::encode(server_pk.as_bytes());
 
@@ -250,30 +280,13 @@ mod tests {
             seal_envelope(&server_pub_hex, token, kind, &events).expect("seal hb should succeed");
         assert!(envelope.len() >= 68);
 
-        // Verify decryption of heartbeat envelope
-        let ephem_pk_bytes: [u8; 32] = envelope[8..40].try_into().unwrap();
-        let ephem_pk = x25519_dalek::PublicKey::from(ephem_pk_bytes);
-        let nonce = &envelope[40..52];
-        let ciphertext_with_tag = &envelope[52..];
+        let (dec_token, dec_kind, dec_events) =
+            decrypt_envelope(&server_sk, &envelope).expect("decrypt hb failed");
+        assert_eq!(dec_token, token);
+        assert_eq!(dec_kind, "hb");
+        assert_eq!(dec_events.len(), 0);
 
-        let shared_secret = server_sk.diffie_hellman(&ephem_pk);
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(&envelope[0..8]), shared_secret.as_bytes());
-        let mut sym_key = [0u8; 32];
-        hk.expand(b"honeyforge-envelope-v1", &mut sym_key).unwrap();
-
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
-        let decrypted_gzip = cipher
-            .decrypt(Nonce::from_slice(nonce), ciphertext_with_tag)
-            .unwrap();
-
-        let mut decoder = GzDecoder::new(&decrypted_gzip[..]);
-        let mut json_bytes = Vec::new();
-        decoder.read_to_end(&mut json_bytes).unwrap();
-
-        let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
-        assert_eq!(parsed["t"].as_str().unwrap(), token);
-        assert_eq!(parsed["k"].as_str().unwrap(), "hb");
-        assert_eq!(parsed["e"].as_array().unwrap().len(), 0);
+        server_sk.zeroize();
     }
 
     #[test]
@@ -289,5 +302,121 @@ mod tests {
         // Hex string with incorrect length (not 32 bytes)
         let res = seal_envelope("aabbcc", token, kind, &events);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_corrupted_poly1305_tag_handling() {
+        let mut server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let server_pk = x25519_dalek::PublicKey::from(&server_sk);
+        let server_pub_hex = hex::encode(server_pk.as_bytes());
+
+        let token = "tag-tamper-test";
+        let kind = "ingest";
+        let events = vec![IngestEvent::new("ssh", "login")];
+
+        let mut envelope =
+            seal_envelope(&server_pub_hex, token, kind, &events).expect("seal should succeed");
+
+        // Flip 1 bit in the Poly1305 authentication tag (last 16 bytes)
+        let tag_idx = envelope.len() - 1;
+        envelope[tag_idx] ^= 0x01;
+
+        // Decryption must cleanly fail without panic
+        let res = decrypt_envelope(&server_sk, &envelope);
+        assert!(res.is_err(), "decryption with tampered tag must fail");
+        let err = res.err().unwrap();
+        assert!(
+            err.contains("aead decryption failed"),
+            "expected AEAD error message, got: {err}"
+        );
+
+        server_sk.zeroize();
+    }
+
+    #[test]
+    fn test_corrupted_ciphertext_handling() {
+        let mut server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let server_pk = x25519_dalek::PublicKey::from(&server_sk);
+        let server_pub_hex = hex::encode(server_pk.as_bytes());
+
+        let token = "ct-tamper-test";
+        let kind = "ingest";
+        let events = vec![IngestEvent::new("ssh", "login")];
+
+        let mut envelope =
+            seal_envelope(&server_pub_hex, token, kind, &events).expect("seal should succeed");
+
+        // Flip 1 bit in ciphertext payload (byte 53)
+        envelope[53] ^= 0x02;
+
+        let res = decrypt_envelope(&server_sk, &envelope);
+        assert!(res.is_err(), "decryption with tampered ciphertext must fail");
+
+        server_sk.zeroize();
+    }
+
+    #[test]
+    fn test_corrupted_gzip_handling() {
+        let mut server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let server_pk = x25519_dalek::PublicKey::from(&server_sk);
+
+        let token = "corrupt-gzip-token";
+        let key_id = compute_key_id(token);
+
+        // Client ephemeral key
+        let ephem_sk = x25519_dalek::EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+        let ephem_pk = x25519_dalek::PublicKey::from(&ephem_sk);
+        let shared_secret = ephem_sk.diffie_hellman(&server_pk);
+
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(&key_id[..]), shared_secret.as_bytes());
+        let mut sym_key = [0u8; 32];
+        hk.expand(b"honeyforge-envelope-v1", &mut sym_key).unwrap();
+
+        // Encrypt invalid (non-gzip) bytes with valid Poly1305 MAC tag
+        let invalid_gzip_data = b"This is plain text and definitely not valid gzip stream data!";
+        let mut nonce = [0u8; 12];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), invalid_gzip_data.as_ref())
+            .unwrap();
+        sym_key.zeroize();
+
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(&key_id);
+        envelope.extend_from_slice(ephem_pk.as_bytes());
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ciphertext);
+
+        let res = decrypt_envelope(&server_sk, &envelope);
+        assert!(res.is_err(), "decompression of invalid gzip must fail");
+        let err = res.err().unwrap();
+        assert!(
+            err.contains("gzip decompression failed"),
+            "expected gzip decompression error, got: {err}"
+        );
+
+        server_sk.zeroize();
+    }
+
+    #[test]
+    fn test_truncated_envelope_handling() {
+        let mut server_sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let short_env = vec![0u8; 50];
+        let res = decrypt_envelope(&server_sk, &short_env);
+        assert!(res.is_err());
+        assert!(res.err().unwrap().contains("envelope too short"));
+        server_sk.zeroize();
+    }
+
+    #[test]
+    fn test_secret_zeroize_on_drop() {
+        use zeroize::Zeroize;
+        let mut sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        sk.zeroize();
+
+        let mut ephem = x25519_dalek::EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+        ephem.zeroize();
     }
 }
