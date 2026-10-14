@@ -1,0 +1,17 @@
+{
+  "name": "SSH-сервер (OpenSSH 8.9 Ubuntu)",
+  "class": "ssh",
+  "port": 2222,
+  "tags": [
+    "ssh",
+    "auth"
+  ],
+  "description": "Полноценный SSH: обмен ключами, вход по паролю и ключу. Записывает логины, пароли и отпечатки ключей, всем отвечает «Permission denied».",
+  "params": {
+    "version": "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10",
+    "max_auth_tries": 6,
+    "fail_delay_ms": "1800-2600"
+  },
+  "bind": "0.0.0.0",
+  "level": "medium"
+}

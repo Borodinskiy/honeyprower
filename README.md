@@ -42,7 +42,7 @@
 - **Центр** (`main.go`, `internal/`) — сайт оператора, API, приём и расшифровка телеметрии, PostgreSQL
   (с автоматическим graceful fallback на in-memory хранилище при автономном запуске без СУБД).
 - **Агент** (`agent/`, Rust) — компилируется в один бинарник, запускает одну ловушку
-  из локального JSON-конфига. Классы: `banner`, `dialog`, `http`, `port_listener`,
+  из локального JSON-конфига. Классы: `banner`, `ssh`, `dialog`, `http`, `port_listener`,
   `tarpit`, `honeytoken`, `udp`. Поддерживает рандомизированный джиттер и piggybacking heartbeat.
 - **Хранилище** (`internal/storage`) — интерфейс `Storage`; реализации `Postgres`
   (рабочая) и `Memory` (тесты и автономный режим). Схема и демо-данные (`migrations/*.sql`) применяются
