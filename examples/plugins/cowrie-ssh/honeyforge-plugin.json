@@ -1,0 +1,111 @@
+{
+  "name": "cowrie-ssh",
+  "title": "Cowrie SSH Honeypot",
+  "description": "SSH-приманка в стиле Cowrie на Paramiko: оболочка Linux с файловой системой на сессию, цепочки команд, перехват загрузок wget/curl и записанных файлов с SHA-256.",
+  "version": "1.1.0",
+  "mode": "service",
+  "transport": "tcp",
+  "command": [
+    "python3",
+    "honeypot.py"
+  ],
+  "default_port": 2222,
+  "requires": [
+    "python3"
+  ],
+  "pip": [
+    "paramiko>=3.4"
+  ],
+  "python_modules": [
+    "paramiko"
+  ],
+  "packages": {
+    "apt": [
+      "python3"
+    ],
+    "dnf": [
+      "python3"
+    ],
+    "yum": [
+      "python3"
+    ],
+    "apk": [
+      "python3"
+    ],
+    "zypper": [
+      "python3"
+    ]
+  },
+  "params": [
+    {
+      "key": "hostname",
+      "title": "Имя хоста",
+      "type": "string",
+      "default": "srv-prod-db01",
+      "help": "Отображается в приглашении командной строки Linux"
+    },
+    {
+      "key": "banner",
+      "title": "SSH баннер",
+      "type": "string",
+      "default": "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6",
+      "help": "Строка идентификации версии SSH-сервера"
+    },
+    {
+      "key": "auth_mode",
+      "title": "Режим аутентификации",
+      "type": "enum",
+      "default": "accept_all",
+      "options": [
+        {
+          "value": "accept_all",
+          "label": "Принимать любые учетные данные"
+        },
+        {
+          "value": "require_list",
+          "label": "Вход только по списку (остальные отклонять)"
+        },
+        {
+          "value": "reject_all",
+          "label": "Отклонять все (только сбор паролей)"
+        }
+      ]
+    },
+    {
+      "key": "allowed_creds",
+      "title": "Разрешенные учетные записи (user:pass)",
+      "type": "text",
+      "default": "root:root\nroot:123456\nroot:toor\nadmin:admin\nadmin:password\nubuntu:ubuntu",
+      "help": "Список пар логин:пароль через перевод строки для режима по списку"
+    },
+    {
+      "key": "motd",
+      "title": "Сообщение при входе (MOTD)",
+      "type": "text",
+      "default": "Welcome to Ubuntu 22.04.4 LTS (GNU/Linux 5.15.0-105-generic x86_64)\r\n * Documentation:  https://help.ubuntu.com\r\n * Management:     https://landscape.canonical.com\r\n * Support:        https://ubuntu.com/pro\r\n",
+      "help": "Текст приветствия после успешной авторизации"
+    },
+    {
+      "key": "download_payloads",
+      "title": "Скачивать файлы атакующего",
+      "type": "bool",
+      "default": false,
+      "help": "wget/curl действительно скачивают файл (только с публичных адресов) и сохраняют его в каталог данных ловушки для анализа. Выключено — записывается только URL."
+    },
+    {
+      "key": "max_download_kb",
+      "title": "Макс. размер загрузки, КБ",
+      "type": "int",
+      "default": 5120,
+      "min": 16,
+      "max": 65536,
+      "advanced": true,
+      "showIf": {
+        "key": "download_payloads",
+        "in": [
+          "true"
+        ]
+      }
+    }
+  ]
+}
