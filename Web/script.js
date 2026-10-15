@@ -387,7 +387,6 @@ const EVENT_TYPE_LABELS = {
 
 // Статусы ловушки.
 const STATUS_LABELS = { online: '● На связи', offline: '● Нет связи', never: '● Ждёт агента', disabled: '● Выключена' };
-const STATUS_COLORS = { online: '#10b981', offline: '#f59e0b', never: '#6b7280', disabled: '#6b7280' };
 
 // 2. СЛОВАРЬ ПЕРЕВОДОВ (каюсь грешен, переводил не сам, могут быть ошибки)
 
@@ -875,16 +874,15 @@ function buildTrapCard(trap) {
     const status = trap.enabled ? (trap.status || 'never') : 'disabled';
     const statusClass = status === 'online' ? '' : 'inactive';
     const statusText = t(STATUS_LABELS[status] || status);
-    const statusColor = STATUS_COLORS[status] || '#6b7280';
     const selectedClass = state.selectedTrapId === trap.id ? 'selected' : '';
 
     return `
         <div class="trap-item ${statusClass} ${selectedClass}" data-trap-id="${trap.id}">
             <div class="trap-title">
                 <span class="trap-name" title="${escapeHtml(trap.name)}">${escapeHtml(trap.name)}</span>
-                <span class="trap-status" style="color: ${statusColor};">${statusText}</span>
+                <span class="trap-status st-${escapeHtml(status)}">${statusText}</span>
             </div>
-            <div class="trap-info trap-class" style="display: flex; align-items: center; gap: 8px;">
+            <div class="trap-info trap-class">
                 ${getLevelBadge(trap.class)}
                 <span>${escapeHtml(classTitle(trap.class))}</span>
             </div>
@@ -925,10 +923,10 @@ function renderTraps() {
 
 // Состояние хоста: не развёрнут / развёрнут / есть неприменённые изменения.
 function hostState(host) {
-    if (!host.deployedAt) return { key: 'idle', label: t('● Не развёрнут'), color: '#6b7280' };
-    if (host.pendingChanges) return { key: 'pending', label: t('● Есть неприменённые изменения'), color: '#f59e0b' };
+    if (!host.deployedAt) return { key: 'idle', label: t('● Не развёрнут'), cls: 'st-idle' };
+    if (host.pendingChanges) return { key: 'pending', label: t('● Есть неприменённые изменения'), cls: 'st-pending' };
     const allOnline = host.enabledTraps > 0 && host.onlineTraps >= host.enabledTraps;
-    return { key: 'deployed', label: t('● Развёрнут'), color: allOnline ? '#10b981' : '#f59e0b' };
+    return { key: 'deployed', label: t('● Развёрнут'), cls: allOnline ? 'st-deployed' : 'st-partial' };
 }
 
 function hostAddress(host) {
@@ -946,7 +944,7 @@ function buildHostCard(host) {
         <div class="trap-item host-item ${cls}" data-host-id="${host.id}">
             <div class="trap-title">
                 <span class="trap-name" title="${escapeHtml(host.name)}">${escapeHtml(host.name)}</span>
-                <span class="trap-status" style="color: ${st.color};">${escapeHtml(st.label)}</span>
+                <span class="trap-status ${st.cls}">${escapeHtml(st.label)}</span>
             </div>
             <div class="trap-info">${escapeHtml(hostAddress(host))}</div>
             <div class="trap-info"><span>${t('Ловушек')}</span>: ${escapeHtml(host.trapCount ?? 0)} (${t('включено')} ${escapeHtml(host.enabledTraps ?? 0)})${online}</div>
@@ -1013,7 +1011,7 @@ function renderHostView() {
             ? ` · ${t('развёрнут')} ${escapeHtml(new Date(host.deployedAt).toLocaleString(state.currentLang === 'en' ? 'en-GB' : 'ru-RU'))}`
             : '';
         metaEl.innerHTML = `${escapeHtml(hostAddress(host))}${host.useSudo ? ' (sudo)' : ''} · `
-            + `<span class="host-state" style="color: ${st.color};">${escapeHtml(st.label)}</span>${deployed}`;
+            + `<span class="host-state ${st.cls}">${escapeHtml(st.label)}</span>${deployed}`;
         trapsTitle.textContent = t('Ловушки хоста');
         actions.hidden = false;
 
@@ -1067,20 +1065,20 @@ function renderStats() {
     const period = t(RANGE_LABELS[state.dashRange]);
     container.innerHTML = `
         <div class="stat-card">
-            <div class="stat-value" style="color: #10b981;">${escapeHtml(s.onlineTraps ?? 0)}</div>
-            <div class="stat-label">${t('Ловушек на связи')} · ${t('включено')} ${escapeHtml(s.activeTraps ?? 0)}</div>
+            <div class="stat-label">${t('Ловушек на связи')}</div>
+            <div class="stat-value">${escapeHtml(s.onlineTraps ?? 0)}<span class="stat-of"> / ${escapeHtml(s.activeTraps ?? 0)}</span></div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color: var(--viz-attack);">${escapeHtml(d ? d.warnings : s.warnings24h ?? 0)}</div>
-            <div class="stat-label">${d ? `${t('Атаки')} · ${period}` : t('Предупреждения (за 24ч)')}</div>
+            <div class="stat-label">${d ? `${t('Атаки')} ${period}` : t('Предупреждения (за 24ч)')}</div>
+            <div class="stat-value attack">${escapeHtml(d ? d.warnings : s.warnings24h ?? 0)}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color: var(--text-main);">${escapeHtml(d ? d.uniqueSources : '—')}</div>
-            <div class="stat-label">${t('Разных IP-адресов')} · ${period}</div>
+            <div class="stat-label">${t('Разных IP-адресов')} ${period}</div>
+            <div class="stat-value">${escapeHtml(d ? d.uniqueSources : '—')}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color: var(--text-main);">${escapeHtml(d ? d.events : s.totalEvents ?? 0)}</div>
-            <div class="stat-label">${d ? `${t('Событий')} · ${period}` : t('Всего событий')}</div>
+            <div class="stat-label">${d ? `${t('Событий')} ${period}` : t('Всего событий')}</div>
+            <div class="stat-value">${escapeHtml(d ? d.events : s.totalEvents ?? 0)}</div>
         </div>
     `;
 }
