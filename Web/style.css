@@ -568,6 +568,55 @@ h1 {
 .chart-tooltip .tt-key.attack { background: var(--viz-attack); }
 .chart-tooltip .tt-key.other { background: var(--viz-other); }
 
+/* --- Свои ловушки --- */
+.muted { color: var(--text-muted); }
+.mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; }
+.nowrap { white-space: nowrap; }
+.plain-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.plain-table th, .plain-table td {
+    text-align: left;
+    vertical-align: top;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-color);
+}
+.plain-table th { font-size: 12px; font-weight: 600; color: var(--text-muted); white-space: nowrap; }
+.plain-table tr:last-child td { border-bottom: 0; }
+.plugin-list { background: var(--white); border-radius: 6px; margin-bottom: 16px; }
+.plugin-list .table-scroll { border: 1px solid var(--border-color); border-radius: 6px; }
+.plugin-table thead th { background: var(--bg-body); }
+.plugin-title { font-weight: 600; }
+.plugin-desc { margin-top: 4px; color: var(--text-muted); max-width: 420px; }
+.plugin-table td.actions { text-align: right; }
+.plugin-table td.actions .btn + .btn { margin-left: 6px; }
+.plugin-status {
+    padding: 10px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    margin-bottom: 14px;
+    font-size: 14px;
+    background: var(--white);
+}
+.plugin-status-success { border-color: var(--color-success); }
+.plugin-status-error { border-color: var(--color-danger); color: var(--color-danger); white-space: pre-wrap; }
+.plugin-guide { background: var(--white); border: 1px solid var(--border-color); border-radius: 6px; }
+.plugin-guide > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; font-size: 14px; }
+.plugin-guide-body { padding: 0 16px 16px; font-size: 14px; line-height: 1.5; }
+.plugin-guide-body p { margin: 10px 0; }
+.plugin-guide-body .plain-table { margin: 10px 0; }
+.plugin-guide-body .plain-table th { width: 110px; font-family: ui-monospace, Consolas, monospace; color: var(--text-main); }
+.plugin-guide code, .plugin-table code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.code-block {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    background: var(--bg-body);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 10px 0;
+}
+
 /* --- Адаптивность --- */
 @media (max-width: 1200px) {
     .stats-grid { grid-template-columns: repeat(2, 1fr); }

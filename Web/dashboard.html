@@ -39,6 +39,11 @@
             color: #c084fc;
             border: 1px solid rgba(168, 85, 247, 0.35);
         }
+        .badge-custom {
+            background-color: rgba(100, 116, 139, 0.15);
+            color: #64748b;
+            border: 1px solid rgba(100, 116, 139, 0.4);
+        }
     </style>
 </head>
 <body class="dark-theme">
@@ -51,6 +56,7 @@
             <nav>
                 <a href="#" class="nav-link active" data-tab="stats">Статистика</a>
                 <a href="#" class="nav-link" data-tab="traps">Хосты</a>
+                <a href="#" class="nav-link" data-tab="plugins">Свои ловушки</a>
                 <a href="#" class="nav-link" data-tab="events">События</a>
             </nav>
         </div>
@@ -198,6 +204,54 @@
             </div>
         </section>
 
+        <!-- ВКЛАДКА: СВОИ ЛОВУШКИ (ПЛАГИНЫ) -->
+        <section id="plugins" class="tab-content">
+            <div class="traps-header">
+                <h1>Свои ловушки</h1>
+                <div class="traps-actions">
+                    <a class="btn btn-secondary" href="/api/plugin-templates/service" download>Шаблон: service</a>
+                    <a class="btn btn-secondary" href="/api/plugin-templates/stdio" download>Шаблон: stdio</a>
+                    <button class="btn" id="plugin-upload-btn">Загрузить проект</button>
+                    <input type="file" id="plugin-file" accept=".zip,.tar.gz,.tgz,.tar" hidden>
+                </div>
+            </div>
+            <p class="field-help page-help">Свой проект становится классом ловушки: его можно выбрать при создании ловушки и развернуть на любом хосте. Агент запускает программу, следит за ней и пересылает её события в центр.</p>
+
+            <div id="plugin-upload-status" class="plugin-status" hidden></div>
+
+            <div class="plugin-list" id="plugins-list-container"></div>
+
+            <details class="plugin-guide">
+                <summary>Как подготовить проект</summary>
+                <div class="plugin-guide-body">
+                    <p>Архив <code>.zip</code> или <code>.tar.gz</code> с файлом <code>honeyforge-plugin.json</code> в корне (или в единственной папке архива). Проще всего скачать шаблон и поменять в нём код.</p>
+                    <pre class="code-block">{
+  "name": "my-ftp",
+  "title": "Мой FTP",
+  "version": "1.0.0",
+  "mode": "service",
+  "command": ["python3", "server.py"],
+  "default_port": 2121,
+  "requires": ["python3"],
+  "params": [
+    {"key": "banner", "title": "Баннер", "type": "string", "default": "220 ready"}
+  ]
+}</pre>
+                    <table class="plain-table">
+                        <tr><th>name</th><td>латиница, цифры, <code>-</code> и <code>_</code>; класс ловушки будет <code>plugin:name</code></td></tr>
+                        <tr><th>mode</th><td><code>service</code> — программа сама слушает порт из <code>HF_PORT</code> на адресе <code>HF_BIND</code>. <code>stdio</code> — порт слушает агент и на каждое подключение запускает программу: stdin и stdout — это клиент.</td></tr>
+                        <tr><th>command</th><td>как запустить программу; путь с <code>/</code> считается внутри архива (<code>./run.sh</code>)</td></tr>
+                        <tr><th>requires</th><td>программы, которые должны быть на хосте; деплой проверит их до установки</td></tr>
+                        <tr><th>params</th><td>поля формы ловушки, как у встроенных классов: <code>string</code>, <code>text</code>, <code>int</code>, <code>number</code>, <code>bool</code>, <code>enum</code>, <code>list</code>. Значения приходят программе в <code>HF_PARAMS</code> (JSON).</td></tr>
+                    </table>
+                    <p>Событие — одна строка JSON с полем <code>type</code>. В режиме service её можно печатать в stdout или stderr, в режиме stdio — только в stderr. Остальной вывод попадает в журнал агента.</p>
+                    <pre class="code-block">{"type": "auth", "src_ip": "203.0.113.5", "src_port": 51234, "username": "root", "password": "123456"}
+{"type": "command", "data": {"line": "uname -a"}}</pre>
+                    <p>Типы: <code>connect</code>, <code>disconnect</code>, <code>data</code>, <code>auth</code>, <code>command</code>, <code>request</code>, <code>handshake</code>, <code>scan</code>, <code>token</code>, <code>error</code>. В режиме stdio адрес клиента и сессию агент подставит сам. Каталог для записи — <code>HF_DATA_DIR</code>; программа работает от пользователя <code>nobody</code>.</p>
+                </div>
+            </details>
+        </section>
+
         <!-- ВКЛАДКА 3: СОБЫТИЯ -->
         <section id="events" class="tab-content">
             <h1>События</h1>
@@ -325,7 +379,7 @@
 
                 <div class="traps-actions">
                     <a id="download-config-btn" class="btn btn-success" href="#" download>Скачать config.json</a>
-                    <a id="download-bundle-btn" class="btn btn-secondary" href="#" download>Скачать .zip (конфиг + инструкция)</a>
+                    <a id="download-bundle-btn" class="btn btn-secondary" href="#" download>Скачать .zip (конфиг, проект и инструкция)</a>
                 </div>
             </div>
         </div>

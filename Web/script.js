@@ -243,6 +243,43 @@ const api = {
         return this._request(`/traps/${id}/events${q}`);
     },
 
+    // СВОИ ЛОВУШКИ
+
+    async getPlugins() {
+        if (CONFIG.USE_MOCK_DATA) return [];
+        return this._request('/plugins');
+    },
+
+    async deletePlugin(name) {
+        return this._request(`/plugins/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    },
+
+    // Архив уходит как есть (multipart), поэтому не через _request с его JSON.
+    async uploadPlugin(file) {
+        const form = new FormData();
+        form.append('archive', file);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 120000);
+        try {
+            const res = await fetch(`${CONFIG.API_BASE_URL}/plugins`, {
+                method: 'POST', body: form, credentials: 'same-origin', signal: controller.signal
+            });
+            if (res.status === 401) {
+                this._handleAuthError();
+                throw new ApiError('Session expired', 401);
+            }
+            const data = await res.json().catch(() => null);
+            if (!res.ok) throw new ApiError(data?.error || `HTTP ${res.status}`, res.status, data);
+            return { plugin: data, created: res.status === 201 };
+        } catch (err) {
+            if (err.name === 'AbortError') throw new ApiError('Request timeout');
+            if (err instanceof ApiError) throw err;
+            throw new ApiError(err.message || 'Network error');
+        } finally {
+            clearTimeout(timer);
+        }
+    },
+
     async getClasses() {
         if (CONFIG.USE_MOCK_DATA) return [];
         return this._request('/classes');
@@ -321,6 +358,8 @@ const state = {
     selectedTrapId: null,
     editingTrapId: null,
     hosts: [],
+    plugins: [],
+    pluginStatus: null,    // { kind: 'success'|'error'|'loading', text } — итог последней загрузки проекта
     hostSearch: '',
     currentHostId: null,   // null — список хостов; число — открытый хост; 'none' — ловушки без хоста
     editingHostId: null,
@@ -329,7 +368,7 @@ const state = {
     eventTypeFilter: ''
 };
 
-const TAB_LABELS = { traps: 'Хосты', stats: 'Статистика', events: 'События' };
+const TAB_LABELS = { traps: 'Хосты', plugins: 'Свои ловушки', stats: 'Статистика', events: 'События' };
 const RANGE_LABELS = { '1h': 'за 1 ч', '24h': 'за 24 ч', '7d': 'за 7 дней' };
 
 // Типы событий (русские подписи). Набор закрыт на стороне агента/центра.
@@ -454,6 +493,32 @@ const I18N_DICT = {
     "Всего": "Total",
     "За этот период данных нет.": "No data for this period.",
     "За этот период событий нет.": "No events in this period.",
+    "Свои ловушки": "Custom traps",
+    "Порт": "Port",
+    "Встроенные": "Built-in",
+    "Проект": "Project",
+    "Режим": "Mode",
+    "Нужно на хосте": "Needs on host",
+    "Архив": "Archive",
+    "нет": "none",
+    "МБ": "MB",
+    "КБ": "KB",
+    "stdio: соединение — stdin/stdout": "stdio: connection is stdin/stdout",
+    "service: слушает порт сам": "service: listens itself",
+    "Своих ловушек пока нет. Скачайте шаблон, поменяйте код под себя и загрузите архив.": "No custom traps yet. Download a template, change the code and upload the archive.",
+    "Проверяем и загружаем {file}…": "Checking and uploading {file}…",
+    "Загружено: «{title}». Теперь его можно выбрать в классе ловушки.": "Uploaded «{title}». You can now pick it as a trap class.",
+    "Обновлено: «{title}».": "Updated «{title}».",
+    "Хосты с его ловушками нужно развернуть заново, чтобы новая версия заработала.": "Redeploy hosts with its traps to run the new version.",
+    "Удалить проект «{title}»?": "Delete project «{title}»?",
+    "Не удалось загрузить проект.": "Failed to upload the project.",
+    "Не удалось удалить проект.": "Failed to delete the project.",
+    "Проект используют ловушки — сначала удалите их: {traps}.": "The project is used by traps — delete them first: {traps}.",
+    "Новая версия не подходит к уже созданным ловушкам — поправьте их или манифест: {traps}.": "The new version does not fit existing traps — fix them or the manifest: {traps}.",
+    "Загрузить проект": "Upload project",
+    "Шаблон: service": "Template: service",
+    "Шаблон: stdio": "Template: stdio",
+    "Как подготовить проект": "How to prepare a project",
     "Выше": "Up",
     "Ниже": "Down",
     "Пока пусто.": "Empty for now.",
@@ -604,6 +669,10 @@ const SERVER_ERROR_LABELS = {
     'host with this address already exists': 'Хост с таким адресом и SSH-портом уже есть.',
     'host not found': 'Хост не найден.',
     'host has no enabled traps': 'На хосте нет включённых ловушек — разворачивать нечего.',
+    'archive is larger than 32 MB': 'Архив больше 32 МБ.',
+    'archive is empty': 'Файл пустой.',
+    'archive field is required': 'Выберите файл архива.',
+    'plugin not found': 'Такого проекта нет — возможно, его уже удалили.',
     'another operation on this host is in progress': 'С этим хостом уже выполняется операция. Дождитесь её окончания.',
     'stored credentials cannot be decrypted; re-enter them': 'Сохранённый SSH-доступ не расшифровывается (сменился ключ центра). Введите пароль или ключ заново в «Изменить хост».',
     'host has no saved credentials': 'У хоста нет сохранённого SSH-доступа.',
@@ -621,6 +690,8 @@ const SERVER_ERROR_LABELS = {
 // Части составных ошибок деплоя (internal/deploy): между ними — вывод самого агента,
 // поэтому переводим фразы, а не сообщение целиком.
 const SERVER_ERROR_PHRASES = [
+    ['invalid plugin:', 'Проект не принят:'],
+    ['plugin requirements not met on host:', 'На хосте нет программ, нужных своим ловушкам:'],
     ['agent failed to start:', 'Агент не запустился:'],
     ['previous version restored', 'На сервере восстановлена предыдущая рабочая версия — ловушки хоста продолжают работать.'],
     ['agent stopped: no previous working version to restore', 'Агент остановлен: предыдущей рабочей версии нет.'],
@@ -698,6 +769,12 @@ function escapeHtml(str) {
 // по идее должно извлекать данные из сообщений бэка, НО, возможно, будет требовать доработки (без бэка не проверить)
 function getErrorMessage(err, fallbackRuKey) {
     const d = err?.data;
+    if (d?.error === 'plugin is used by traps' || d?.error === 'plugin update breaks traps') {
+        const traps = (d.traps || []).map(u => u.error ? `«${u.trap}»: ${u.error}` : `«${u.trap}»`).join('; ');
+        return t(d.error === 'plugin is used by traps'
+            ? 'Проект используют ловушки — сначала удалите их: {traps}.'
+            : 'Новая версия не подходит к уже созданным ловушкам — поправьте их или манифест: {traps}.').replace('{traps}', traps);
+    }
     if (d?.error === 'port conflict') {
         return t('Порт {port} на этом хосте уже занят ловушкой «{trap}».')
             .replace('{port}', d.port || '?').replace('{trap}', d.trap || '?');
@@ -785,6 +862,8 @@ function getLevelBadge(classId) {
         badgeClass = 'badge-high';
     } else if (level === 'ICS/SCADA' || level === 'ICS') {
         badgeClass = 'badge-ics';
+    } else if (level === 'Custom') {
+        badgeClass = 'badge-custom';
     } else {
         badgeClass = 'badge-low';
     }
@@ -1330,6 +1409,7 @@ function renderAll() {
     renderTraps();
     renderStats();
     renderDashboard();
+    renderPlugins();
     applyUserMenu();
     updateTrapActions();
 
@@ -1380,6 +1460,14 @@ async function loadDashboard() {
 }
 
 // Каталог классов и шаблонов нужен для формы создания и названий классов на карточках.
+async function loadPlugins() {
+    try {
+        state.plugins = await api.getPlugins() || [];
+    } catch (err) {
+        console.error('[loadPlugins]', err);
+    }
+}
+
 async function loadCatalog() {
     try {
         const [classes, presets] = await Promise.all([api.getClasses(), api.getPresets()]);
@@ -1398,7 +1486,7 @@ async function refreshAll() {
     renderTraps();
     renderStats();
 
-    await Promise.all([loadTraps(), loadStats(), loadDashboard()]);
+    await Promise.all([loadTraps(), loadStats(), loadDashboard(), loadPlugins()]);
 
     state.loading = false;
     renderAll();
@@ -1750,8 +1838,13 @@ function setClassHelp(classId) {
 function populateClassSelect(selectedClass) {
     const sel = document.getElementById('trap-class');
     if (!sel) return;
-    sel.innerHTML = state.classes.map(c =>
-        `<option value="${c.id}">[${escapeHtml(c.level || 'Low')}] ${escapeHtml(c.title)}</option>`).join('');
+    const option = c => `<option value="${escapeHtml(c.id)}">[${escapeHtml(c.level || 'Low')}] ${escapeHtml(c.title)}</option>`;
+    const builtin = state.classes.filter(c => c.origin !== 'plugin');
+    const custom = state.classes.filter(c => c.origin === 'plugin');
+    sel.innerHTML = custom.length
+        ? `<optgroup label="${escapeHtml(t('Встроенные'))}">${builtin.map(option).join('')}</optgroup>`
+          + `<optgroup label="${escapeHtml(t('Свои ловушки'))}">${custom.map(option).join('')}</optgroup>`
+        : builtin.map(option).join('');
     if (selectedClass) sel.value = selectedClass;
 }
 
@@ -2145,6 +2238,119 @@ async function switchTab(tabId, clickedLink) {
     }
 }
 
+// ---------- Свои ловушки ----------
+
+function formatSize(bytes) {
+    if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} ${t('МБ')}`;
+    return `${Math.max(1, Math.round(bytes / 1024))} ${t('КБ')}`;
+}
+
+function renderPlugins() {
+    const status = document.getElementById('plugin-upload-status');
+    if (status) {
+        const st = state.pluginStatus;
+        status.hidden = !st;
+        if (st) {
+            status.className = `plugin-status plugin-status-${st.kind}`;
+            status.textContent = st.text;
+        }
+    }
+    const box = document.getElementById('plugins-list-container');
+    if (!box) return;
+    if (!state.plugins.length) {
+        box.innerHTML = `<p class="empty-hint">${t('Своих ловушек пока нет. Скачайте шаблон, поменяйте код под себя и загрузите архив.')}</p>`;
+        return;
+    }
+    const rows = state.plugins.map(p => {
+        const used = p.usedBy.length
+            ? p.usedBy.map(u => {
+                const host = u.hostId != null ? hostById(u.hostId) : null;
+                return `${escapeHtml(u.trap)}${host ? ` <span class="muted">(${escapeHtml(host.name)})</span>` : ''}`;
+            }).join(', ')
+            : `<span class="muted">${t('нет')}</span>`;
+        const mode = p.mode === 'stdio' ? t('stdio: соединение — stdin/stdout') : t('service: слушает порт сам');
+        return `
+            <tr>
+                <td>
+                    <div class="plugin-title">${escapeHtml(p.title)}${p.version ? ` <span class="muted">${escapeHtml(p.version)}</span>` : ''}</div>
+                    <div class="muted mono">${escapeHtml(p.class)}</div>
+                    ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
+                </td>
+                <td>${escapeHtml(mode)}<div class="muted mono">${escapeHtml(p.command.join(' '))}</div></td>
+                <td>${p.defaultPort ? `${p.defaultPort}/${escapeHtml(p.transport)}` : `<span class="muted">—</span>`}</td>
+                <td>${p.requires.length ? escapeHtml(p.requires.join(', ')) : `<span class="muted">—</span>`}</td>
+                <td>${used}</td>
+                <td class="nowrap">${formatSize(p.size)}<div class="muted mono" title="SHA-256: ${escapeHtml(p.sha256)}">${escapeHtml(p.sha256.slice(0, 12))}</div></td>
+                <td class="nowrap actions">
+                    <a class="btn btn-secondary btn-small" href="${CONFIG.API_BASE_URL}/plugins/${encodeURIComponent(p.name)}/archive" download>${t('Архив')}</a>
+                    <button class="btn btn-danger btn-small" data-delete-plugin="${escapeHtml(p.name)}">${t('Удалить')}</button>
+                </td>
+            </tr>`;
+    }).join('');
+    box.innerHTML = `
+        <div class="table-scroll">
+            <table class="plain-table plugin-table">
+                <thead><tr>
+                    <th>${t('Проект')}</th><th>${t('Режим')}</th><th>${t('Порт')}</th><th>${t('Нужно на хосте')}</th>
+                    <th>${t('Ловушки')}</th><th>${t('Архив')}</th><th></th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+}
+
+async function handlePluginUpload(file) {
+    if (!file) return;
+    state.pluginStatus = { kind: 'loading', text: t('Проверяем и загружаем {file}…').replace('{file}', file.name) };
+    renderPlugins();
+    try {
+        const { plugin: p, created } = await api.uploadPlugin(file);
+        let text = (created ? t('Загружено: «{title}». Теперь его можно выбрать в классе ловушки.')
+            : t('Обновлено: «{title}».')).replace('{title}', p.title + (p.version ? ' ' + p.version : ''));
+        if (!created && p.usedBy.some(u => u.hostId != null)) {
+            text += ' ' + t('Хосты с его ловушками нужно развернуть заново, чтобы новая версия заработала.');
+        }
+        state.pluginStatus = { kind: 'success', text };
+        await Promise.all([loadCatalog(), loadPlugins(), loadTraps()]);
+        renderAll();
+    } catch (err) {
+        console.error('[handlePluginUpload]', err);
+        state.pluginStatus = { kind: 'error', text: getErrorMessage(err, 'Не удалось загрузить проект.') };
+        renderPlugins();
+    }
+}
+
+async function handlePluginDelete(name) {
+    const p = state.plugins.find(x => x.name === name);
+    if (!p || !confirm(t('Удалить проект «{title}»?').replace('{title}', p.title))) return;
+    try {
+        await api.deletePlugin(name);
+        state.pluginStatus = null;
+        await Promise.all([loadCatalog(), loadPlugins()]);
+        renderAll();
+    } catch (err) {
+        console.error('[handlePluginDelete]', err);
+        state.pluginStatus = { kind: 'error', text: getErrorMessage(err, 'Не удалось удалить проект.') };
+        renderPlugins();
+    }
+}
+
+function initPlugins() {
+    const btn = document.getElementById('plugin-upload-btn');
+    const input = document.getElementById('plugin-file');
+    if (!btn || !input) return;
+    btn.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        input.value = ''; // тот же файл можно выбрать снова после правки
+        handlePluginUpload(file);
+    });
+    document.getElementById('plugins-list-container').addEventListener('click', (e) => {
+        const del = e.target.closest('[data-delete-plugin]');
+        if (del) handlePluginDelete(del.dataset.deletePlugin);
+    });
+}
+
 // Загружает и рендерит события для конкретной ловушки
 // silent — фоновое обновление: без плейсхолдера загрузки и без затирания списка при ошибке.
 async function loadAndRenderEvents(trapId, { silent = false } = {}) {
@@ -2416,6 +2622,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (e) { /* localStorage может быть выключен */ }
 
     initDashboard();
+    initPlugins();
 
     // --- Вкладки ---
     document.querySelectorAll('.nav-link').forEach(link => {

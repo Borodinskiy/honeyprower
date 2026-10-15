@@ -103,6 +103,14 @@ HoneyForge разделяет ловушки на четыре специали�
   - Функции Modbus: FC 01 (Read Coils), FC 02 (Read Discrete Inputs), FC 03 (Read Holding Registers), FC 04 (Read Input Registers), FC 05 (Write Single Coil), FC 06 (Write Single Register), FC 15/16 (Write Multiple Coils/Registers), FC 43 (MEI 14 - чтение Vendor Name, Product Code, Firmware Revision).
   - **Двухрежимный HTTP Fallback**: при отправке HTTP-запроса на порт 502 агент отдает полноценный веб-интерфейс SCADA Web HMI (интерактивная HTML5/SVG мнемосхема подстанции) и REST API (`/api/tags` с JSON-телеметрией датчиков).
 
+### 2.5 Свои ловушки (`plugin:<name>`)
+Свой проект (Python, Go, shell — что угодно) загружается архивом с манифестом
+`honeyforge-plugin.json` на вкладке «Свои ловушки» и становится ещё одним
+классом. Агент запускает программу, перезапускает её при падении и пересылает
+её события (строки JSON в выводе) в центр. Два режима: `service` — программа
+сама слушает порт, `stdio` — порт слушает агент, а соединение — это
+stdin/stdout программы. Формат и шаблоны — в [docs/plugins.md](docs/plugins.md).
+
 ---
 
 ## 3. Скрытный односторонний транспорт (Stealth Channel)
