@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"honeyprower/internal/pydeps"
 	"io"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -341,6 +344,9 @@ func TestPluginLooseTrapBundleAndConfig(t *testing.T) {
 	if !strings.Contains(string(run), dir) || !strings.Contains(string(run), "python3") {
 		t.Fatalf("RUN.txt должен рассказать про плагин: %s", run)
 	}
+	if strings.Contains(string(run), "/api/ingest") || !strings.Contains(string(run), "/cdn-cgi/rum") {
+		t.Fatalf("RUN.txt должен называть канал, которым агент реально шлёт события: %s", run)
+	}
 
 	// хост-конфиг для ручного запуска — тоже с относительным путём
 	host := e.createHost(passwordHost("h", "10.0.0.7"))
@@ -460,5 +466,34 @@ func TestHostStatusSeesPortOfServicePlugin(t *testing.T) {
 	st = decodeInto[hostStatusResponse](t, e.do("GET", fmt.Sprintf("/api/hosts/%d/status", host.ID), nil))
 	if strings.Join(st.MissingPorts, ",") != "2424/tcp" {
 		t.Fatalf("missing = %v", st.MissingPorts)
+	}
+}
+
+func TestPluginDepsGoToDeployer(t *testing.T) {
+	e := newPluginEnv(t)
+	manifest := strings.Replace(ftpManifest("1.0"), `"requires":["python3"],`,
+		`"requires":["python3"],"pip":["paramiko>=3.4"],"python_modules":["paramiko"],"packages":{"apt":["python3"],"dnf":["python3"]},`, 1)
+	e.expect(e.upload(pluginZip(t, manifest)), http.StatusCreated)
+	host := e.createHost(passwordHost("web", "10.0.0.5"))
+	e.createTrap(pluginTrap(&host.ID, "ftp", 2121, map[string]any{}))
+
+	var calls [][]string
+	e.h.PyDeps = &pydeps.Builder{Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte("ERROR: offline"), errors.New("exit status 1")
+	}}
+	e.expect(e.do("POST", fmt.Sprintf("/api/hosts/%d/deploy", host.ID), nil), http.StatusOK)
+	p := e.dep.lastPayload.Plugins[0]
+	if p.PyDeps == nil || p.Packages["dnf"][0] != "python3" || p.PythonModules[0] != "paramiko" {
+		t.Fatalf("деплойеру нужны пакеты, модули и сборщик pip: %+v", p)
+	}
+	_, err := p.PyDeps(context.Background(), pydeps.Platform{PyMajor: 3, PyMinor: 11, Machine: "x86_64", Libc: "glibc", LibcVersion: "2.36"})
+	if err == nil || !strings.Contains(err.Error(), "ERROR: offline") || len(calls) != 1 || !slices.Contains(calls[0], "paramiko>=3.4") {
+		t.Fatalf("сборщик качает pip-зависимости манифеста: err=%v calls=%v", err, calls)
+	}
+
+	list := decodeInto[[]pluginView](t, e.do("GET", "/api/plugins", nil))
+	if list[0].Pip[0] != "paramiko>=3.4" || list[0].Packages["apt"][0] != "python3" {
+		t.Fatalf("API показывает зависимости: %+v", list[0])
 	}
 }

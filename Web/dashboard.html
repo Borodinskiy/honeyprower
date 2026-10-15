@@ -193,6 +193,8 @@
   "command": ["python3", "server.py"],
   "default_port": 2121,
   "requires": ["python3"],
+  "pip": ["paramiko>=3.4"],
+  "packages": {"apt": ["python3"], "dnf": ["python3"]},
   "params": [
     {"key": "banner", "title": "Баннер", "type": "string", "default": "220 ready"}
   ]
@@ -202,6 +204,8 @@
                         <tr><th>mode</th><td><code>service</code> — программа сама слушает порт из <code>HF_PORT</code> на адресе <code>HF_BIND</code>. <code>stdio</code> — порт слушает агент и на каждое подключение запускает программу: stdin и stdout — это клиент.</td></tr>
                         <tr><th>command</th><td>как запустить программу; путь с <code>/</code> считается внутри архива (<code>./run.sh</code>)</td></tr>
                         <tr><th>requires</th><td>программы, которые должны быть на хосте; деплой проверит их до установки</td></tr>
+                        <tr><th>pip</th><td>зависимости из PyPI (<code>paramiko&gt;=3.4</code>): центр скачает их под платформу каждого хоста и привезёт сам — на хосте не нужны ни pip, ни интернет</td></tr>
+                        <tr><th>packages</th><td>системные пакеты по менеджерам (<code>apt</code>, <code>dnf</code>, <code>yum</code>, <code>apk</code>, <code>zypper</code>): недостающие центр поставит из репозиториев хоста</td></tr>
                         <tr><th>params</th><td>поля формы ловушки, как у встроенных классов: <code>string</code>, <code>text</code>, <code>int</code>, <code>number</code>, <code>bool</code>, <code>enum</code>, <code>list</code>. Значения приходят программе в <code>HF_PARAMS</code> (JSON).</td></tr>
                     </table>
                     <p>Событие — одна строка JSON с полем <code>type</code>. В режиме service её можно печатать в stdout или stderr, в режиме stdio — только в stderr. Остальной вывод попадает в журнал агента.</p>

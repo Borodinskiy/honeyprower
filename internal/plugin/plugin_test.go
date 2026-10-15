@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -266,6 +267,17 @@ func TestManifestValidation(t *testing.T) {
 		{"команда наружу", func(m map[string]any) { m["command"] = []any{"../../bin/sh"} }, "за пределы"},
 		{"порт", func(m map[string]any) { m["default_port"] = 70000 }, "default_port"},
 		{"requires с shell", func(m map[string]any) { m["requires"] = []any{"python3; rm -rf /"} }, "requires"},
+		{"модуль с shell", func(m map[string]any) { m["python_modules"] = []any{"os; reboot"} }, "python_modules"},
+		{"модуль-путь", func(m map[string]any) { m["python_modules"] = []any{"../x"} }, "python_modules"},
+		{"pip с shell", func(m map[string]any) { m["pip"] = []any{"paramiko; rm -rf /"} }, "pip"},
+		{"pip с опцией", func(m map[string]any) { m["pip"] = []any{"--index-url=http://evil/"} }, "pip"},
+		{"pip с URL", func(m map[string]any) { m["pip"] = []any{"x @ https://evil/x.whl"} }, "pip"},
+		{"pip ок", func(m map[string]any) { m["pip"] = []any{"paramiko>=3.4,<4", "requests[socks]", "pyyaml==6.0.1"} }, ""},
+		{"менеджер пакетов", func(m map[string]any) { m["packages"] = map[string]any{"brew": []any{"x"}} }, "packages"},
+		{"пакет с shell", func(m map[string]any) { m["packages"] = map[string]any{"apt": []any{"nmap;reboot"}} }, "packages.apt"},
+		{"пакеты ок", func(m map[string]any) {
+			m["packages"] = map[string]any{"apt": []any{"python3", "libc6:amd64"}, "dnf": []any{"python3"}, "apk": []any{"python3"}}
+		}, ""},
 		{"ключ параметра", func(m map[string]any) {
 			m["params"] = []any{map[string]any{"key": "a-b", "title": "x", "type": "string"}}
 		}, "key"},
@@ -370,5 +382,23 @@ func TestTemplatesAreValidPlugins(t *testing.T) {
 	}
 	if _, _, err := Template("nope"); err == nil {
 		t.Fatal("неизвестный шаблон")
+	}
+}
+
+func TestManifestPythonModulesRequirePython(t *testing.T) {
+	m, err := ParseManifest([]byte(`{"name":"ssh","command":["python3","s.py"],"python_modules":["paramiko","cryptography.hazmat"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.Requires, "python3") || len(m.PythonModules) != 2 {
+		t.Fatalf("requires = %v, modules = %v", m.Requires, m.PythonModules)
+	}
+	m, _ = ParseManifest([]byte(`{"name":"ssh","command":["python3","s.py"],"pip":["paramiko>=3.4"]}`))
+	if !slices.Contains(m.Requires, "python3") {
+		t.Fatalf("pip тоже требует python3: %v", m.Requires)
+	}
+	m, _ = ParseManifest([]byte(`{"name":"ssh","command":["python3","s.py"],"requires":["python3"],"python_modules":["paramiko"]}`))
+	if len(m.Requires) != 1 {
+		t.Fatalf("python3 не дублируется: %v", m.Requires)
 	}
 }

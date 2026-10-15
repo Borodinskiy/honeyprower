@@ -15,6 +15,7 @@ import (
 
 	"honeyprower/internal/deploy"
 	"honeyprower/internal/httpx"
+	"honeyprower/internal/pydeps"
 	"honeyprower/internal/storage"
 )
 
@@ -247,9 +248,16 @@ func (h *Handlers) agentPayload(ctx context.Context, cfg *agentConfig, target de
 		if err != nil {
 			return deploy.Payload{}, http.StatusInternalServerError, "failed to load plugin " + p.rec.Name
 		}
-		payload.Plugins = append(payload.Plugins, deploy.PluginFiles{
+		files := deploy.PluginFiles{
 			Name: p.rec.Name, Dir: pluginDir(p, true), Archive: archive, Requires: p.manifest.Requires,
-		})
+			PythonModules: p.manifest.PythonModules, Packages: p.manifest.Packages,
+		}
+		if reqs := p.manifest.Pip; len(reqs) > 0 {
+			files.PyDeps = func(ctx context.Context, pl pydeps.Platform) ([]byte, error) {
+				return h.pyDeps().Build(ctx, reqs, pl)
+			}
+		}
+		payload.Plugins = append(payload.Plugins, files)
 	}
 	return payload, 0, ""
 }

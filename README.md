@@ -17,7 +17,10 @@
   - Medium: настоящий SSH, диалоговые протоколы по правилам (FTP, SMTP, POP3, IMAP, Telnet), HTTP с перехватом логинов, Redis, MQTT, honeytoken.
   - High: оболочка Linux с виртуальной файловой системой.
   - АСУ ТП: МЭК 60870-5-104, Modbus TCP с веб-интерфейсом диспетчера.
-- **Свои ловушки.** Свой проект на любом языке загружается архивом и разворачивается так же, как встроенные классы ([docs/plugins.md](docs/plugins.md)).
+- **Свои ловушки.**
+  - Свой проект на любом языке загружается архивом и разворачивается так же, как встроенные классы ([docs/plugins.md](docs/plugins.md)).
+  - Зависимости центр доставляет сам: системные пакеты ставит менеджером пакетов сервера (apt, dnf, yum, apk, zypper), а Python-библиотеки скачивает под платформу каждого сервера и привозит по SSH. Серверу не нужны ни pip, ни интернет.
+  - Пример — SSH-приманка в стиле Cowrie ([examples/plugins/cowrie-ssh](examples/plugins/cowrie-ssh)).
 - **Honeytoken.** Ссылки-маячки и учётки-приманки: вход с учёткой-приманкой в любую ловушку поднимает событие `token`.
 - **Развёртывание по SSH.**
   - Установка, обновление и снятие агента, проверка запуска и откат на прошлую рабочую версию.
@@ -87,7 +90,9 @@ PUBLIC_URL=http://10.0.0.5:8080 docker compose up -d
 2. На странице хоста — «+ Создать ловушку»: класс, порт, параметры. Готовые
    шаблоны есть в поле «Шаблон».
 3. «Развернуть». Центр:
-   - проверит, что на сервере есть программы, нужные своим ловушкам;
+   - доставит зависимости своих ловушек: недостающие системные пакеты — из
+     репозиториев сервера, Python-библиотеки — собранными под платформу этого
+     сервера; проверит, что всё нужное на месте;
    - положит агента, конфиг и unit-файл systemd;
    - запустит агента от `nobody` и через 3 с проверит, что служба работает.
    Если агент не стартовал — например, порт занят, — оператор увидит причину,
@@ -112,7 +117,8 @@ docker compose cp app:/app/agent/honeyforge-agent .   # бинарник из о
 
 ## Запуск без Docker
 
-Нужны Go 1.26+, Rust (stable) и PostgreSQL (проверено на 16) с созданной базой.
+Нужны Go 1.26+, Rust (stable), PostgreSQL (проверено на 16) с созданной базой
+и Python 3 с pip — если свои ловушки используют Python-зависимости.
 
 ```bash
 # агент — его центр раздаёт на серверы
@@ -188,6 +194,8 @@ FALLBACK_INMEMORY=true go run .
 | `HF_SECRET_KEY` | — | Ключ шифрования SSH-доступа к хостам: 64 hex-символа, base64 от 32 байт или фраза от 16 символов |
 | `HF_SECRET_KEY_FILE` | `data/secret.key` | Файл ключа, если `HF_SECRET_KEY` не задан; создаётся при первом запуске |
 | `HF_AGENT_BIN`, `HF_AGENT_SERVICE` | `agent/target/release/honeyforge-agent`, `agent/honeyforge-agent.service` | Бинарник агента и unit-файл для развёртывания |
+| `HF_PYTHON` | `python3` | Python центра с pip: им скачиваются Python-зависимости своих ловушек |
+| `HF_PYDEPS_CACHE` | `data/pydeps` | Кэш собранных под платформы зависимостей |
 | `ALLOW_REGISTRATION` | `true` | `false` — запретить регистрацию новых операторов |
 | `DEMO_DATA` | `false` | `true` — генерировать демо-атаки для показа дашборда |
 
@@ -198,6 +206,7 @@ API — [docs/api.md](docs/api.md).
 ```bash
 go test ./...                       # центр
 cd agent && cargo test              # агент
+python3 -m unittest discover -s examples/plugins/cowrie-ssh   # пример своей ловушки, нужен paramiko
 ```
 
 Тесты хранилища на настоящем PostgreSQL:
@@ -213,10 +222,12 @@ TEST_DB_DSN="postgres://honeyforge:honeyforge@localhost:5432/honeyforge_test?ssl
 main.go             запуск центра
 internal/           центр: handlers (API), storage (PostgreSQL и память),
                     deploy (SSH), catalog (классы и шаблоны), plugin (свои ловушки),
+                    pydeps (Python-зависимости под платформу хоста),
                     auth, secret, demo
 migrations/         схема БД и стартовые данные
 Web/                сайт оператора
 agent/              агент на Rust
 deploy/agent-configs  конфиги демо-агентов docker-compose
+examples/plugins/   пример своей ловушки (SSH в стиле Cowrie)
 docs/               схема, свои ловушки, примеры атак, API
 ```

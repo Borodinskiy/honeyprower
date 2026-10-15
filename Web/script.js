@@ -21,7 +21,7 @@ const CONFIG = {
     DASH_RANGE_KEY: 'dash_range',
     THEME_KEY: 'app_theme',
     REQUEST_TIMEOUT: 10000,
-    SSH_TIMEOUT: 240000, // деплой, снятие и статус хоста идут по SSH и бывают долгими
+    SSH_TIMEOUT: 600000, // деплой по SSH с установкой пакетов и зависимостей идёт минутами (как router.SlowTimeout)
     POLL_INTERVAL: 10000 // автообновление дашборда, мс
 };
 
@@ -382,6 +382,7 @@ const EVENT_TYPE_LABELS = {
     handshake: 'Рукопожатие',
     scan: 'Сканирование',
     token: 'Honeytoken',
+    payload: 'Загрузка файла',
     error: 'Ошибка'
 };
 
@@ -433,6 +434,8 @@ const I18N_DICT = {
     "Выберите ловушку": "Select a trap",
     "Подключение": "Connection",
     "Попытка входа": "Auth attempt",
+    "Загрузка файла": "File download",
+    "пакеты": "packages",
     "Сканирование": "Scan",
     "Нет событий": "No events",
 
@@ -2243,6 +2246,16 @@ function formatSize(bytes) {
     return `${Math.max(1, Math.round(bytes / 1024))} ${t('КБ')}`;
 }
 
+// Что нужно проекту на хосте: программы и что центр привезёт или поставит сам.
+function pluginNeeds(p) {
+    const parts = [];
+    if (p.requires.length) parts.push(p.requires.join(', '));
+    if (p.pip && p.pip.length) parts.push('pip: ' + p.pip.join(', '));
+    const pkgs = [...new Set(Object.values(p.packages || {}).flat())];
+    if (pkgs.length) parts.push(t('пакеты') + ': ' + pkgs.join(', '));
+    return parts.join(' · ');
+}
+
 function renderPlugins() {
     const status = document.getElementById('plugin-upload-status');
     if (status) {
@@ -2276,7 +2289,7 @@ function renderPlugins() {
                 </td>
                 <td>${escapeHtml(mode)}<div class="muted mono">${escapeHtml(p.command.join(' '))}</div></td>
                 <td>${p.defaultPort ? `${p.defaultPort}/${escapeHtml(p.transport)}` : `<span class="muted">—</span>`}</td>
-                <td>${p.requires.length ? escapeHtml(p.requires.join(', ')) : `<span class="muted">—</span>`}</td>
+                <td>${pluginNeeds(p) ? escapeHtml(pluginNeeds(p)) : `<span class="muted">—</span>`}</td>
                 <td>${used}</td>
                 <td class="nowrap">${formatSize(p.size)}<div class="muted mono" title="SHA-256: ${escapeHtml(p.sha256)}">${escapeHtml(p.sha256.slice(0, 12))}</div></td>
                 <td class="nowrap actions">
@@ -2472,6 +2485,10 @@ function eventDetail(ev) {
             return `порты: ${(d.ports || []).join(', ')}`;
         case 'token':
             return `сработал токен ${d.label || d.token || ''}`;
+        case 'payload':
+            return [d.url || d.path || d.command, d.payload_sha256 && `SHA-256 ${d.payload_sha256.slice(0, 16)}…`,
+                d.payload_size != null && `${d.payload_size} байт`, d.downloaded === false && 'не скачан']
+                .filter(Boolean).join(' · ');
         case 'handshake':
             return d.telnet_options ? `telnet: ${d.telnet_options.join(', ')}` : JSON.stringify(d);
         case 'disconnect':

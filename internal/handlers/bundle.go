@@ -272,7 +272,22 @@ func generateRunInstructions(t *models.Trap, cfg agentConfig) string {
 		if len(p.manifest.Requires) > 0 {
 			extra += " На машине должны быть: " + strings.Join(p.manifest.Requires, ", ") + "."
 		}
+		if len(p.manifest.Pip) > 0 {
+			extra += "\nЗависимости Python поставьте в каталог проекта (агент сам добавит его в PYTHONPATH):\n" +
+				"     python3 -m pip install --target " + pluginDir(p, false) + "/.hf-pydeps " + shellQuote(p.manifest.Pip) + "\n"
+		} else if len(p.manifest.PythonModules) > 0 {
+			extra += " Модули Python: " + strings.Join(p.manifest.PythonModules, ", ") + "."
+		}
+		for _, mgr := range plugin.PackageManagers {
+			if pkgs := p.manifest.Packages[mgr]; len(pkgs) > 0 {
+				extra += "\nСистемные пакеты (" + mgr + "): " + strings.Join(pkgs, " ") + "."
+			}
+		}
 		extra += "\n"
+	}
+	sink := cfg.CenterURL + " — зашифрованно, POST на " + strings.Join(cfg.StealthPaths, ", ")
+	if cfg.Transport == "udp_burst" {
+		sink = cfg.CenterUDP + " — зашифрованно, UDP-датаграммами"
 	}
 	return fmt.Sprintf(`HoneyForge — ловушка «%s» (класс %s)
 
@@ -283,12 +298,12 @@ func generateRunInstructions(t *models.Trap, cfg agentConfig) string {
      ./honeyforge-agent config.json
 %s
 Ловушка поднимется на %s и будет слать телеметрию в центр:
-     %s/api/ingest
+     %s
 
 Токен ловушки уже вписан в config.json. Канал односторонний: из центра
 к агенту ничего не идёт. Чтобы изменить ловушку — обновите её на сайте,
 скачайте новый config.json и перезапустите агент.
-`, t.Name, t.Class, extra, where, cfg.CenterURL)
+`, t.Name, t.Class, extra, where, sink)
 }
 
 // addPluginToZip раскладывает архив плагина в zip под каталогом dir, сохраняя
@@ -319,4 +334,13 @@ func addPluginToZip(zw *zip.Writer, dir string, archive []byte) error {
 			return err
 		}
 	})
+}
+
+// shellQuote — аргументы для команды в инструкции: зависимости вроде paramiko>=3.4 в кавычках.
+func shellQuote(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = "'" + strings.ReplaceAll(a, "'", "'\\''") + "'"
+	}
+	return strings.Join(out, " ")
 }

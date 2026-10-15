@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"honeyprower/internal/pydeps"
 )
 
 func pluginTarget(server *mockSSHServer) TargetConfig {
@@ -96,10 +98,11 @@ func TestDeploy_SkipsPluginVersionAlreadyOnHost(t *testing.T) {
 func TestDeploy_MissingRequirementsStopBeforeTouchingAgent(t *testing.T) {
 	server := newMockSSHServer(t)
 	server.allowedUsers["root"] = "pw"
-	server.failCommands["do command -v"] = "python3 node\n"
+	server.cmdOutputs["do command -v"] = "hf-missing: python3 node\n"
+	server.cmdExitCodes["do command -v"] = 1
 	p := PluginFiles{Name: "x", Dir: "/opt/honeyforge/plugins/x-aaaaaaaaaaaa", Archive: []byte("a"), Requires: []string{"python3", "node"}}
 	err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, p))
-	if !errors.Is(err, ErrPluginRequirements) || !strings.Contains(err.Error(), "python3 node") {
+	if !errors.Is(err, ErrPluginRequirements) || !strings.HasSuffix(err.Error(), ": python3 node") {
 		t.Fatalf("err = %v", err)
 	}
 	server.mu.Lock()
@@ -161,5 +164,159 @@ func TestParseAllListeningPortsIncludesOtherProcesses(t *testing.T) {
 	}
 	if got := parseAllListeningPorts(out); len(got) != 3 || got[0] != 22 || got[1] != 2121 || got[2] != 2222 {
 		t.Fatalf("all ports = %v", got)
+	}
+}
+
+func TestDeploy_ChecksPythonModulesAsPluginWouldSee(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	server.cmdExitCodes["test -f /opt/honeyforge/plugins/"] = 1
+	// stderr занят «лекцией» sudo — список недостающего читается из stdout
+	server.failCommands["HOME=/nonexistent python3 -s"] = "We trust you have received the usual lecture...\n"
+	server.cmdOutputs["HOME=/nonexistent python3 -s"] = "hf-missing: python3:paramiko\n"
+	server.cmdExitCodes["HOME=/nonexistent python3 -s"] = 1
+	p := PluginFiles{Name: "x", Dir: "/opt/honeyforge/plugins/x-aaaaaaaaaaaa", Archive: []byte("a"),
+		Requires: []string{"python3"}, PythonModules: []string{"paramiko", "cryptography.hazmat"}}
+	err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, p))
+	if !errors.Is(err, ErrPluginRequirements) || !strings.HasSuffix(err.Error(), ": python3:paramiko") || strings.Contains(err.Error(), "lecture") {
+		t.Fatalf("err = %v", err)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	check := indexOf(server.commands, `PYTHONPATH=/opt/honeyforge/plugins/x-aaaaaaaaaaaa/.hf-pydeps HOME=/nonexistent python3 -s -c "import paramiko"`)
+	if check < 0 || !strings.Contains(server.commands[check], `"import cryptography.hazmat"`) {
+		t.Fatalf("модули проверяются с зависимостями плагина и без пользовательских site-packages: %q", server.commands)
+	}
+	if check < indexOf(server.commands, "tar -xzf /tmp/hf_plugin_x-aaaaaaaaaaaa.tgz") {
+		t.Fatal("проверка модулей — после установки файлов плагина")
+	}
+	if indexOf(server.commands, "hf_agent_bin") >= 0 {
+		t.Fatal("без модулей агента не трогаем")
+	}
+}
+
+func TestDeploy_InstallsMissingPackagesWithHostManager(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	server.cmdOutputs["command -v apt-get"] = "hf-pm:apt\n"
+	p := PluginFiles{Name: "x", Dir: "/opt/honeyforge/plugins/x-aaaaaaaaaaaa", Archive: []byte("a"), Requires: []string{"python3"},
+		Packages: map[string][]string{"apt": {"python3", "nmap"}, "dnf": {"python3", "nmap-ncat"}}}
+	if err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, p)); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	install := indexOf(server.commands, "for p in python3 nmap; do dpkg-query")
+	if install < 0 || !strings.Contains(server.commands[install], "apt-get install -y -q --no-install-recommends $todo") {
+		t.Fatalf("пакеты apt ставятся только недостающие: %q", server.commands)
+	}
+	if indexOf(server.commands, "nmap-ncat") >= 0 {
+		t.Fatal("пакеты других менеджеров не трогаем")
+	}
+	if !(install < indexOf(server.commands, "do command -v \"$c\"") && install < indexOf(server.commands, "hf_agent_bin")) {
+		t.Fatalf("пакеты — до проверки программ и агента: %q", server.commands)
+	}
+}
+
+func TestDeploy_PackageInstallFailureLeavesAgentAlone(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	server.cmdOutputs["command -v apt-get"] = "hf-pm:dnf\n"
+	server.cmdOutputs["dnf install"] = "hf-installing: python3-scapy\n"
+	server.failCommands["dnf install"] = "Error: Failed to download metadata for repo 'fedora': Cannot download repomd.xml\n"
+	p := PluginFiles{Name: "x", Dir: "/opt/honeyforge/plugins/x-aaaaaaaaaaaa", Archive: []byte("a"),
+		Packages: map[string][]string{"dnf": {"python3-scapy"}}}
+	err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, p))
+	if !errors.Is(err, ErrPluginPackages) || !strings.Contains(err.Error(), "dnf: python3-scapy") || !strings.Contains(err.Error(), "Cannot download repomd.xml") {
+		t.Fatalf("err = %v", err)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if indexOf(server.commands, "hf_agent_bin") >= 0 || indexOf(server.commands, "hf_plugin_") >= 0 {
+		t.Fatal("без пакетов ничего не ставим")
+	}
+}
+
+func TestDeploy_ShipsPythonDepsBuiltForHostPlatform(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	server.cmdExitCodes["test -f /opt/honeyforge/plugins/"] = 1
+	server.cmdOutputs["platform.libc_ver"] = "3 11 aarch64 glibc 2.36\n"
+	var asked []pydeps.Platform
+	deps := func(_ context.Context, pl pydeps.Platform) ([]byte, error) {
+		asked = append(asked, pl)
+		return []byte("deps for " + pl.String()), nil
+	}
+	a := PluginFiles{Name: "a", Dir: "/opt/honeyforge/plugins/a-111111111111", Archive: []byte("a"), Requires: []string{"python3"}, PyDeps: deps}
+	b := PluginFiles{Name: "b", Dir: "/opt/honeyforge/plugins/b-222222222222", Archive: []byte("b"), Requires: []string{"python3"}, PyDeps: deps}
+	if err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, a, b)); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	want := pydeps.Platform{PyMajor: 3, PyMinor: 11, Machine: "aarch64", Libc: "glibc", LibcVersion: "2.36"}
+	if len(asked) != 2 || asked[0] != want || asked[1] != want {
+		t.Fatalf("зависимости собираются под платформу хоста: %+v", asked)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	probes := 0
+	for _, c := range server.commands {
+		if strings.Contains(c, "platform.libc_ver") {
+			probes++
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("платформа определяется один раз за развёртывание, было %d", probes)
+	}
+	if string(server.files["/tmp/hf_pydeps_a-111111111111.tgz"]) != "deps for cp311-aarch64-glibc2.36" {
+		t.Fatal("архив зависимостей не доставлен")
+	}
+	inst := indexOf(server.commands, "tar -xzf /tmp/hf_plugin_a-111111111111.tgz")
+	if inst < 0 || !strings.Contains(server.commands[inst], "tar -xzf /tmp/hf_pydeps_a-111111111111.tgz -C /opt/honeyforge/plugins/a-111111111111.tmp/.hf-pydeps --no-same-owner") ||
+		strings.Index(server.commands[inst], ".hf-pydeps") > strings.Index(server.commands[inst], ".hf-complete") {
+		t.Fatalf("зависимости распаковываются в каталог плагина до метки готовности: %q", server.commands[inst])
+	}
+}
+
+func TestDeploy_PythonDepsNotRebuiltForInstalledVersion(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	called := false
+	p := PluginFiles{Name: "a", Dir: "/opt/honeyforge/plugins/a-111111111111", Archive: []byte("a"),
+		PyDeps: func(context.Context, pydeps.Platform) ([]byte, error) { called = true; return nil, nil }}
+	if err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, p)); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("версия уже на хосте — зависимости не нужны")
+	}
+}
+
+func TestDeploy_PythonDepsErrorNamesPlatform(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	server.cmdExitCodes["test -f /opt/honeyforge/plugins/"] = 1
+	server.cmdOutputs["platform.libc_ver"] = "3 6 x86_64 glibc 2.17\n"
+	p := PluginFiles{Name: "a", Dir: "/opt/honeyforge/plugins/a-111111111111", Archive: []byte("a"),
+		PyDeps: func(context.Context, pydeps.Platform) ([]byte, error) {
+			return nil, errors.New("No matching distribution found for paramiko>=3.4")
+		}}
+	err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, p))
+	if err == nil || !strings.Contains(err.Error(), "cp36-x86_64-glibc2.17") || !strings.Contains(err.Error(), "No matching distribution") {
+		t.Fatalf("err = %v", err)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if indexOf(server.commands, "hf_agent_bin") >= 0 {
+		t.Fatal("агента не трогаем")
+	}
+}
+
+func TestDeploy_RejectsUnsafePythonModule(t *testing.T) {
+	server := newMockSSHServer(t)
+	server.allowedUsers["root"] = "pw"
+	p := PluginFiles{Name: "x", Dir: "/opt/honeyforge/plugins/x-aaaaaaaaaaaa", PythonModules: []string{"os; reboot"}}
+	err := NewSSHDeployer().Deploy(deployCtx(t), pluginTarget(server), pluginPayload(t, p))
+	if err == nil || !strings.Contains(err.Error(), "invalid python module") {
+		t.Fatalf("err = %v", err)
 	}
 }

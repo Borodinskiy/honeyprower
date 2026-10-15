@@ -15,7 +15,9 @@ RUN cargo build --release
 
 # --- рантайм ---
 FROM docker.io/library/alpine:3.22
-RUN adduser -D -H -u 10001 app && mkdir -p /app/data && chown app /app/data
+# python3 + pip: центр скачивает Python-зависимости своих ловушек под платформу хостов.
+RUN apk add --no-cache python3 py3-pip \
+ && adduser -D -H -u 10001 app && mkdir -p /app/data && chown app /app/data
 WORKDIR /app
 COPY --from=build /out/honeyforge /app/honeyforge
 COPY Web /app/Web
@@ -26,7 +28,9 @@ ENV WEB_ADDR=:8080 \
     STATIC_DIR=/app/Web \
     HF_AGENT_BIN=/app/agent/honeyforge-agent \
     HF_AGENT_SERVICE=/app/agent/honeyforge-agent.service \
-    HF_SECRET_KEY_FILE=/app/data/secret.key
+    HF_SECRET_KEY_FILE=/app/data/secret.key \
+    HF_PYDEPS_CACHE=/app/data/pydeps \
+    PIP_NO_CACHE_DIR=1
 USER app
 # Ключ шифрования SSH-доступа к хостам: без тома он пропадёт вместе с контейнером.
 VOLUME /app/data

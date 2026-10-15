@@ -19,6 +19,7 @@ pub mod event_type {
     pub const SCAN: &str = "scan";
     pub const TOKEN: &str = "token";
     pub const ERROR: &str = "error";
+    pub const PAYLOAD: &str = "payload";
 }
 
 #[derive(Debug, Clone, Serialize)]

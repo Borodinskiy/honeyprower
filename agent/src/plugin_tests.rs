@@ -65,8 +65,59 @@ fn plugin_cfg(dir: &Path, mode: &str, port: u16, params: Value, command: Value) 
     .unwrap()
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+/// bind_all для тестов: параллельные тесты запускают процессы, и дочерний
+/// процесс до exec держит копии сокетов родителя — только что отпущенный порт
+/// может быть занят ещё миллисекунды. Повторяем, пока ошибок больше, чем ждём.
+pub(crate) async fn bind_all_settled(
+    units: &[crate::runtime::Unit],
+    expected_errors: usize,
+) -> Result<Vec<crate::runtime::Bound>, Vec<String>> {
+    let mut attempt = 0;
+    loop {
+        let res = crate::runtime::bind_all(units).await;
+        let extra = match &res {
+            Ok(_) => false,
+            Err(e) => e.len() > expected_errors,
+        };
+        if !extra || attempt == 40 {
+            return res;
+        }
+        attempt += 1;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Порт освободился: та же оговорка про fork, что у bind_all_settled.
+pub(crate) async fn rebind_settled(ip: &str, port: u16) -> std::io::Result<TcpListener> {
+    let mut attempt = 0;
+    loop {
+        match TcpListener::bind((ip, port)).await {
+            Err(e) if attempt < 40 => {
+                attempt += 1;
+                let _ = e;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+pub(crate) fn free_port() -> u16 {
+    // Порты вне диапазона временных (32768+): из него ОС раздаёт и bind(0), и
+    // исходящие соединения параллельных тестов, и только что отпущенный порт
+    // успевали занять. Здесь каждый порт выдаётся один раз за прогон.
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let _ = NEXT.compare_exchange(0, 20000 + (std::process::id() % 5000) as u16, Ordering::SeqCst, Ordering::SeqCst);
+    loop {
+        let port = NEXT.fetch_add(1, Ordering::SeqCst);
+        if port >= 30000 {
+            panic!("тестам не хватило портов 20000-29999");
+        }
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() && std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 // ----------------------------- разбор строк -----------------------------
@@ -109,6 +160,9 @@ fn event_line_sanitizes() {
     assert_eq!(ev.event_type, "data");
     assert_eq!(ev.data["custom_type"], "exploit");
     assert_eq!(ev.data["value"], "x", "не-объект в data заворачивается");
+    // payload — как у встроенной high_interaction
+    let ev = parse_event_line(br#"{"type":"payload","data":{"payload_sha256":"ab"}}"#, &d).unwrap();
+    assert_eq!(ev.event_type, "payload");
     // мусор вместо адреса и портов → значения по умолчанию
     let ev = parse_event_line(br#"{"type":"connect","src_ip":"evil; rm -rf","src_port":70000,"dst_port":-1}"#, &d).unwrap();
     assert_eq!(ev.src_ip, "10.0.0.1");
@@ -256,6 +310,22 @@ echo "you said: $line"
     assert_eq!(data.data["text"], "uname -a\n");
     assert_eq!(data.session, cmd.session, "одна сессия");
     assert!(!evs.iter().any(|e| e.data.to_string().contains("plain log line")), "журнал не становится событием");
+}
+
+#[tokio::test]
+async fn python_deps_from_center_are_on_pythonpath() {
+    let dir = plugin_dir("pydeps", "#!/bin/sh\nexec python3 -c 'import hfdep; print(hfdep.X)'\n");
+    let deps = dir.join(crate::traps::plugin::PYDEPS_DIR);
+    std::fs::create_dir_all(&deps).unwrap();
+    std::fs::write(deps.join("hfdep.py"), "X = 'from .hf-pydeps'\n").unwrap();
+    let trap = Arc::new(Trap::build(&plugin_cfg(&dir, "stdio", 2222, json!({}), json!(["./run.sh"]))).unwrap());
+    let (sink, _rx) = EventSink::test_sink();
+    let (addr, server) = serve_one(trap, sink).await;
+    let mut out = String::new();
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), client.read_to_string(&mut out)).await.unwrap().unwrap();
+    assert_eq!(out, "from .hf-pydeps\n");
+    tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -421,7 +491,7 @@ async fn service_crash_after_start_is_reported_and_restarted() {
 
 #[tokio::test]
 async fn start_plugins_frees_port_and_fails_whole_agent_on_bad_plugin() {
-    use crate::runtime::{bind_all, build_units, start_plugins};
+    use crate::runtime::{build_units, start_plugins};
     let good = plugin_dir("good", "#!/bin/sh\nexec sleep 30\n");
     let bad = plugin_dir("bad", "#!/bin/sh\necho 'bad config' >&2\nexit 1\n");
     let cfg: Config = serde_json::from_value(json!({
@@ -435,7 +505,7 @@ async fn start_plugins_frees_port_and_fails_whole_agent_on_bad_plugin() {
     }))
     .unwrap();
     let units = build_units(cfg.units().unwrap()).unwrap();
-    let bound = bind_all(&units).await.unwrap();
+    let bound = bind_all_settled(&units, 0).await.unwrap();
     let sinks: Vec<EventSink> = units.iter().map(|_| EventSink::test_sink().0).collect();
     let errors = match start_plugins(&units, bound, &sinks).await {
         Ok(_) => panic!("плохой плагин должен остановить запуск"),
@@ -454,7 +524,7 @@ async fn start_plugins_frees_port_and_fails_whole_agent_on_bad_plugin() {
     }))
     .unwrap();
     let units = build_units(cfg.units().unwrap()).unwrap();
-    let bound = bind_all(&units).await.unwrap();
+    let bound = bind_all_settled(&units, 0).await.unwrap();
     let sinks: Vec<EventSink> = units.iter().map(|_| EventSink::test_sink().0).collect();
     let (rest, handles) = start_plugins(&units, bound, &sinks).await.expect("программа должна занять свой порт");
     assert!(rest.is_empty());

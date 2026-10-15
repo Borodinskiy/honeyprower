@@ -24,6 +24,7 @@ import (
 	"honeyprower/internal/deploy"
 	"honeyprower/internal/handlers"
 	"honeyprower/internal/middleware"
+	"honeyprower/internal/pydeps"
 	"honeyprower/internal/router"
 	"honeyprower/internal/secret"
 	"honeyprower/internal/storage"
@@ -59,6 +60,7 @@ func main() {
 	handlers.Deployer = deploy.NewSSHDeployer()
 	handlers.AllowRegistration = honeycfg.AllowRegistration
 	handlers.PublicURL = honeycfg.PublicURL
+	handlers.PyDeps = &pydeps.Builder{Python: honeycfg.Python, CacheDir: honeycfg.PyDepsCache}
 	if err := setAgentTransport(handlers, honeycfg); err != nil {
 		log.Fatal(err)
 	}
@@ -217,9 +219,10 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 	webMux := http.NewServeMux()
 	if proxy != nil {
 		webMux.Handle("/api/", proxy)
-		// Деплой и снятие по SSH идут дольше WriteTimeout веб-сервера — продлеваем срок только для них.
+		// Деплой и снятие по SSH идут дольше WriteTimeout веб-сервера — продлеваем срок только для них
+		// (на API-сервере то же делает router).
 		slowSSH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(4 * time.Minute))
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(router.SlowTimeout))
 			proxy.ServeHTTP(w, r)
 		})
 		webMux.Handle("POST /api/traps/{id}/deploy", slowSSH)

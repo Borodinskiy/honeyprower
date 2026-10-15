@@ -10,6 +10,7 @@ import (
 
 	"honeyprower/internal/auth"
 	"honeyprower/internal/deploy"
+	"honeyprower/internal/pydeps"
 	"honeyprower/internal/secret"
 	"honeyprower/internal/storage"
 )
@@ -32,6 +33,9 @@ type Handlers struct {
 
 	// hostOps не даёт запустить два деплоя/снятия одного хоста одновременно.
 	hostOps sync.Map // host id -> *sync.Mutex
+	// PyDeps собирает Python-зависимости своих ловушек под платформу хоста (pip центра, кэш).
+	PyDeps *pydeps.Builder
+
 	// honeyCreds — учётки-приманки ловушек honeytoken для сверки входов.
 	honeyCreds credCache
 }
@@ -46,6 +50,7 @@ func New(dbStorage storage.Storage, authMgr *auth.Manager) *Handlers {
 		AllowRegistration: true,
 		Deployer:          deploy.NewSSHDeployer(),
 		Secrets:           ephemeralBox(),
+		PyDeps:            &pydeps.Builder{},
 	}
 }
 
@@ -59,4 +64,14 @@ func ephemeralBox() *secret.Box {
 		panic(err)
 	}
 	return b
+}
+
+// defaultPyDeps — для Handlers, собранных без New (тесты): python3 центра, без кэша.
+var defaultPyDeps = &pydeps.Builder{}
+
+func (h *Handlers) pyDeps() *pydeps.Builder {
+	if h.PyDeps == nil {
+		return defaultPyDeps
+	}
+	return h.PyDeps
 }

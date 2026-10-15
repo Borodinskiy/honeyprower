@@ -32,6 +32,10 @@ type Config struct {
 	// или фраза от 16 символов), иначе файл SecretKeyFile, создаваемый при первом запуске.
 	SecretKey     string
 	SecretKeyFile string
+
+	// Python-зависимости своих ловушек: интерпретатор центра с pip и кэш собранных архивов.
+	Python      string
+	PyDepsCache string
 }
 
 // TODO: чтение конфигурационных файлов помимо переменных окружения
@@ -54,6 +58,9 @@ func Load() *Config {
 
 		SecretKey:     os.Getenv("HF_SECRET_KEY"),
 		SecretKeyFile: getenv("HF_SECRET_KEY_FILE", "data/secret.key"),
+
+		Python:      getenv("HF_PYTHON", "python3"),
+		PyDepsCache: getenv("HF_PYDEPS_CACHE", "data/pydeps"),
 	}
 }
 
