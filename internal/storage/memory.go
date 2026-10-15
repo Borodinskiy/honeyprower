@@ -417,6 +417,44 @@ func (m *Memory) InsertEvent(_ context.Context, trapID int64, in models.IngestEv
 	return &ev, nil
 }
 
+func (m *Memory) AddDemoEvents(_ context.Context, events []DemoEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, de := range events {
+		r, ok := m.traps[de.TrapID]
+		if !ok {
+			return ErrNotFound
+		}
+		in := de.Event
+		m.eventSeq++
+		m.events[de.TrapID] = append(m.events[de.TrapID], models.Event{
+			ID: m.eventSeq, TrapID: de.TrapID, TrapName: r.def.Name, Class: r.def.Class,
+			Type: in.EventType, Proto: in.Proto, Source: in.SrcIP, SrcPort: in.SrcPort, DstPort: in.DstPort,
+			Session: in.Session, Username: in.Username, Password: in.Password, Data: in.Data,
+			TS: in.TS, Time: formatTS(in.TS),
+		})
+	}
+	return nil
+}
+
+func (m *Memory) DeleteDemoEvents(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	removed := 0
+	for id, evs := range m.events {
+		kept := evs[:0]
+		for _, e := range evs {
+			if strings.HasPrefix(e.Session, DemoSessionPrefix) {
+				removed++
+			} else {
+				kept = append(kept, e)
+			}
+		}
+		m.events[id] = kept
+	}
+	return removed, nil
+}
+
 func (m *Memory) TouchTrap(_ context.Context, token string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -493,6 +531,21 @@ func (m *Memory) GetStats(_ context.Context) (*models.Stats, error) {
 		}
 	}
 	return s, nil
+}
+
+func (m *Memory) GetDashboard(_ context.Context, window, bucket, utcOffset time.Duration) (*models.Dashboard, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	d := newDashboard(m.now(), window, bucket, utcOffset)
+	var pool []models.Event
+	for id, r := range m.traps {
+		for _, e := range m.events[id] {
+			e.TrapName = r.def.Name // ловушку могли переименовать после события
+			pool = append(pool, e)
+		}
+	}
+	dashboardFromEvents(d, pool)
+	return d, nil
 }
 
 // ---------------- users ----------------

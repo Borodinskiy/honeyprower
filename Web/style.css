@@ -15,6 +15,12 @@
     --text-muted: #6b7280;
     --border-color: #e5e7eb;
     --white: #ffffff;
+    /* графики: «атаки» и «прочие» — одна пара цветов на всех графиках дашборда */
+    --viz-attack: #eb6834;
+    --viz-other: #2a78d6;
+    --viz-track: #f0efec;
+    --viz-grid: #e5e7eb;
+    --viz-wash: rgba(0, 0, 0, 0.05);
 }
 
 * {
@@ -477,12 +483,99 @@ h1 {
     padding: 30px 0;
 }
 
+/* --- Дашборд: графики --- */
+.range-switch { display: inline-flex; border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; }
+.range-switch button {
+    background: var(--white); color: var(--text-muted); border: 0; padding: 7px 14px;
+    font: inherit; font-size: 13px; cursor: pointer;
+}
+.range-switch button + button { border-left: 1px solid var(--border-color); }
+.range-switch button:hover { color: var(--text-main); background: var(--viz-wash); }
+.range-switch button.active { color: var(--text-main); font-weight: 600; background: var(--viz-wash); }
+
+.chart-card {
+    background: var(--white);
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    padding: 20px;
+    margin-bottom: 20px;
+    min-width: 0;
+}
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.chart-head h2 { font-size: 16px; margin: 0; }
+.chart-sub { color: var(--text-muted); font-size: 13px; margin: 4px 0 14px; }
+.chart-head + .hbars, .chart-head + .activity-chart { margin-top: 14px; }
+.chart-legend { display: flex; gap: 16px; font-size: 13px; color: var(--text-muted); }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.key-attack { background: var(--viz-attack); }
+.key-other { background: var(--viz-other); }
+.chart-empty { color: var(--text-muted); font-size: 14px; padding: 16px 0; }
+
+.charts-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.charts-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.charts-grid .chart-card { margin-bottom: 0; }
+.charts-grid + .charts-grid, .charts-grid + h2 { margin-top: 20px; }
+.charts-grid + h2 { margin-top: 30px; }
+
+.activity-chart { position: relative; width: 100%; }
+.activity-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.activity-chart text { fill: var(--text-muted); font-size: 11px; }
+.activity-chart text.chart-empty-label { font-size: 14px; }
+.activity-chart .grid { stroke: var(--viz-grid); stroke-width: 1; }
+.activity-chart .baseline { stroke: var(--text-muted); stroke-width: 1; opacity: 0.6; }
+.activity-chart .seg-attack { fill: var(--viz-attack); }
+.activity-chart .seg-other { fill: var(--viz-other); }
+.activity-chart .col-hit { fill: transparent; cursor: default; }
+.activity-chart .col-hit:hover, .activity-chart .col-hit:focus { fill: var(--viz-wash); outline: none; }
+
+.chart-table { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+.chart-table summary { cursor: pointer; }
+.chart-table table { width: 100%; border-collapse: collapse; margin-top: 8px; color: var(--text-main); font-variant-numeric: tabular-nums; }
+.chart-table th, .chart-table td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--border-color); }
+.chart-table th:first-child, .chart-table td:first-child { text-align: left; }
+.chart-table-scroll { max-height: 260px; overflow-y: auto; }
+
+.hbars { display: flex; flex-direction: column; gap: 4px; }
+.hbar {
+    display: grid; grid-template-columns: minmax(0, 38%) minmax(0, 1fr) auto; align-items: center; gap: 10px;
+    padding: 5px 6px; margin: 0 -6px; border-radius: 4px; font-size: 13px;
+}
+.hbar:hover, .hbar:focus-visible { background: var(--viz-wash); outline: none; }
+.hbar.clickable { cursor: pointer; }
+.hbar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-main); }
+.hbar-label.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.hbar-label small { color: var(--text-muted); margin-left: 6px; font-family: inherit; }
+.hbar-track { display: flex; gap: 2px; height: 10px; }
+.hbar-seg { height: 100%; min-width: 2px; }
+.hbar-seg:first-child { border-radius: 0; }
+.hbar-seg:last-child { border-radius: 0 4px 4px 0; }
+.hbar-seg.attack { background: var(--viz-attack); }
+.hbar-seg.other { background: var(--viz-other); }
+.hbar-value { color: var(--text-main); font-variant-numeric: tabular-nums; text-align: right; min-width: 3ch; }
+
+.chart-tooltip {
+    position: fixed; z-index: 1000; pointer-events: none;
+    background: var(--white); color: var(--text-main);
+    border: 1px solid var(--border-color); border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+    padding: 8px 10px; font-size: 12px; min-width: 140px; max-width: 280px;
+}
+.chart-tooltip .tt-title { color: var(--text-muted); margin-bottom: 4px; overflow-wrap: anywhere; }
+.chart-tooltip .tt-row { display: flex; align-items: center; gap: 6px; line-height: 1.6; }
+.chart-tooltip .tt-row strong { font-variant-numeric: tabular-nums; }
+.chart-tooltip .tt-key { width: 10px; height: 2px; border-radius: 1px; flex: none; }
+.chart-tooltip .tt-key.attack { background: var(--viz-attack); }
+.chart-tooltip .tt-key.other { background: var(--viz-other); }
+
 /* --- Адаптивность --- */
 @media (max-width: 1200px) {
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .charts-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 900px) {
     .stats-grid { grid-template-columns: 1fr; }
+    .charts-grid, .charts-grid-3 { grid-template-columns: minmax(0, 1fr); }
     nav a { padding: 0 10px; font-size: 13px; }
 }
 @media (max-width: 600px) {
@@ -509,6 +602,11 @@ body.dark-theme {
     --text-muted: #a0aec0;
     --border-color: #4a5568;
     --white: #2d3748;
+    --viz-attack: #d95926;
+    --viz-other: #3987e5;
+    --viz-track: #3a4556;
+    --viz-grid: #4a5568;
+    --viz-wash: rgba(255, 255, 255, 0.07);
 
     background-color: var(--bg-body);
     color: var(--text-main);
@@ -520,6 +618,7 @@ body.dark-theme nav a:hover { color: #ffffff; }
 body.dark-theme nav a.active { background-color: var(--color-accent); color: #ffffff; }
 
 body.dark-theme .stat-card,
+body.dark-theme .chart-card,
 body.dark-theme .trap-item {
     background: var(--white);
     border: 1px solid var(--border-color);

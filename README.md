@@ -374,6 +374,7 @@ curl -i http://localhost:502/api/tags
 | `HF_SECRET_KEY_FILE` | `data/secret.key`   | Файл ключа, если `HF_SECRET_KEY` не задан (создаётся при первом запуске, права `0600`) |
 | `HF_AGENT_BIN`, `HF_AGENT_SERVICE` | `agent/target/release/honeyforge-agent`, `agent/honeyforge-agent.service` | Бинарник агента и unit-файл для деплоя по SSH |
 | `ALLOW_REGISTRATION` | `true`              | `false` — запрет регистрации новых операторов  |
+| `DEMO_DATA`          | `false`             | `true` — центр генерирует демо-атаки на включённые ловушки (неделя истории и новые события каждые несколько секунд). При запуске с `false` демо-события удаляются, настоящие не трогаются |
 | `DB_DSN` / `DATABASE_URL` | —              | Строка подключения к PostgreSQL                |
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSLMODE` | `localhost`, `5432`, `postgres`, `postgres`, `honeyforge`, `disable` | Параметры подключения к СУБД |
 

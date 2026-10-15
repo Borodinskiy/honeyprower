@@ -19,6 +19,7 @@ type Config struct {
 
 	AllowRegistration bool   // разрешена ли самостоятельная регистрация операторов
 	FallbackInMemory  bool   // использовать ли базу данных в ОЗУ при ошибке подключения к настоящей бд
+	DemoData          bool   // генерировать демо-трафик атак для показа дашборда (internal/demo)
 	PublicURL         string // внешний адрес центра для агентов (в config.json); пусто — из запроса
 
 	// Ключ шифрования SSH-доступа к хостам: HF_SECRET_KEY (64 hex, base64 32 байт
@@ -38,6 +39,7 @@ func Load() *Config {
 
 		AllowRegistration: getbool("ALLOW_REGISTRATION", true),
 		FallbackInMemory:  getbool("FALLBACK_INMEMORY", false),
+		DemoData:          getbool("DEMO_DATA", false),
 		PublicURL:         os.Getenv("PUBLIC_URL"),
 
 		SecretKey:     os.Getenv("HF_SECRET_KEY"),

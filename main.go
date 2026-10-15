@@ -19,6 +19,7 @@ import (
 
 	"honeyprower/internal/auth"
 	"honeyprower/internal/config"
+	"honeyprower/internal/demo"
 	"honeyprower/internal/deploy"
 	"honeyprower/internal/handlers"
 	"honeyprower/internal/middleware"
@@ -89,6 +90,17 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// ---------- demo traffic ----------
+	// С DEMO_DATA центр сам генерирует атаки для показа; без него убирает оставшиеся демо-события.
+	demoCtx, stopDemo := context.WithCancel(context.Background())
+	defer stopDemo()
+	if honeycfg.DemoData {
+		log.Println("WARN: DEMO_DATA is on — generating fake attack events")
+		go demo.Run(demoCtx, dbStorage)
+	} else {
+		go demo.Clear(demoCtx, dbStorage)
+	}
+
 	// ---------- run ----------
 	// Отслеживание цепочки ошибок в проверках ниже
 	errCh := make(chan error, 2)
@@ -123,6 +135,7 @@ func main() {
 		log.Printf("signal %s — shutting down", sig)
 	}
 
+	stopDemo()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_ = webSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)

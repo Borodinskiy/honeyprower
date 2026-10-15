@@ -58,6 +58,7 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 
 	mux.Handle("GET /api/events", requireAuth(http.HandlerFunc(handlers.ListFilterEvents)))
 	mux.Handle("GET /api/stats", requireAuth(http.HandlerFunc(handlers.GetStats)))
+	mux.Handle("GET /api/stats/dashboard", requireAuth(http.HandlerFunc(handlers.GetDashboard)))
 
 	// Защита от CSRF; /api/ingest исключён — это серверный канал агентов,
 	// у которого своя аутентификация по токену, а не cookie-сессия.

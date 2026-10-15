@@ -18,6 +18,7 @@ const CONFIG = {
     API_BASE_URL: '/api',
     LEGACY_TOKEN_KEY: 'auth_token', // старые версии хранили токен здесь — подчищаем
     LANG_KEY: 'app_lang',
+    DASH_RANGE_KEY: 'dash_range',
     THEME_KEY: 'app_theme',
     REQUEST_TIMEOUT: 10000,
     SSH_TIMEOUT: 240000, // деплой, снятие и статус хоста идут по SSH и бывают долгими
@@ -125,6 +126,13 @@ const api = {
     async getStats() {
         if (CONFIG.USE_MOCK_DATA) return this._recalcStats();
         return this._request('/stats');
+    },
+
+    // Агрегаты для графиков: range = '1h' | '24h' | '7d'.
+    async getDashboard(range) {
+        if (CONFIG.USE_MOCK_DATA) return null;
+        const tz = -new Date().getTimezoneOffset(); // вёдра графика ровные по местному времени
+        return this._request(`/stats/dashboard?range=${encodeURIComponent(range)}&tz=${tz}`);
     },
 
     async createTrap(trap) {
@@ -301,11 +309,13 @@ const api = {
 
 const state = {
     currentLang: 'ru',
-    currentTab: 'traps',
+    currentTab: 'stats',
     traps: [],
     classes: [],
     presets: [],
     stats: null,
+    dashboard: null,
+    dashRange: '24h',      // окно графиков на «Статистике»: '1h' | '24h' | '7d'
     user: null,
     loading: false,
     selectedTrapId: null,
@@ -320,6 +330,7 @@ const state = {
 };
 
 const TAB_LABELS = { traps: 'Хосты', stats: 'Статистика', events: 'События' };
+const RANGE_LABELS = { '1h': 'за 1 ч', '24h': 'за 24 ч', '7d': 'за 7 дней' };
 
 // Типы событий (русские подписи). Набор закрыт на стороне агента/центра.
 const EVENT_TYPE_LABELS = {
@@ -376,7 +387,6 @@ const I18N_DICT = {
     "Событий": "Events",
     "Включённых ловушек": "Enabled traps",
     "Предупреждения (за 24ч)": "Warnings (24h)",
-    "Детализация по активным ловушкам": "Details for active traps",
     "Параметры должны быть корректным JSON.": "Params must be valid JSON.",
     "Параметры должны быть JSON-объектом.": "Params must be a JSON object.",
 
@@ -417,6 +427,33 @@ const I18N_DICT = {
     "Переключить тему": "Toggle theme",
     "Загрузка...": "Loading...",
     "Данных пока нет.": "No data yet.",
+    "Атаки": "Attacks",
+    "Прочие события": "Other events",
+    "включено": "enabled",
+    "Разных IP-адресов": "Unique IP addresses",
+    "Событий": "Events",
+    "за 1 ч": "last hour",
+    "за 24 ч": "last 24 h",
+    "за 7 дней": "last 7 days",
+    "1 ч": "1 h",
+    "24 ч": "24 h",
+    "7 дн": "7 d",
+    "Активность": "Activity",
+    "Атаки — попытки входа, сканирования и срабатывания honeytoken.": "Attacks are login attempts, scans and honeytoken hits.",
+    "Показать таблицей": "Show as table",
+    "Самые активные IP": "Most active IPs",
+    "Атаки и прочие события с одного адреса.": "Attacks and other events from one address.",
+    "Нажмите на ловушку, чтобы открыть её события.": "Click a trap to open its events.",
+    "Типы событий": "Event types",
+    "Частые логины": "Top usernames",
+    "Частые пароли": "Top passwords",
+    "Попыток входа": "Login attempts",
+    "Ловушек задето": "Traps hit",
+    "Последнее событие": "Last event",
+    "Время": "Time",
+    "Всего": "Total",
+    "За этот период данных нет.": "No data for this period.",
+    "За этот период событий нет.": "No events in this period.",
     "Ловушки не найдены.": "No traps found.",
     "Ошибка загрузки данных.": "Failed to load data.",
     "Не удалось создать ловушку.": "Failed to create trap.",
@@ -927,7 +964,7 @@ function renderHostOpStatus() {
     document.getElementById('host-op-text').textContent = r.text;
 }
 
-// Рисует три KPI-карточки на вкладке "Статистика": активные ловушки, предупреждения за 24ч, активные задачи.
+// Рисует KPI-карточки на вкладке "Статистика": ловушки на связи и итоги выбранного периода.
 function renderStats() {
     const container = document.getElementById('stats-container');
     if (!container) return;
@@ -943,45 +980,305 @@ function renderStats() {
     }
 
     const s = state.stats;
+    const d = state.dashboard;
+    const period = t(RANGE_LABELS[state.dashRange]);
     container.innerHTML = `
         <div class="stat-card">
             <div class="stat-value" style="color: #10b981;">${escapeHtml(s.onlineTraps ?? 0)}</div>
-            <div class="stat-label">${t('Ловушек на связи')}</div>
+            <div class="stat-label">${t('Ловушек на связи')} · ${t('включено')} ${escapeHtml(s.activeTraps ?? 0)}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value">${escapeHtml(s.activeTraps ?? 0)}</div>
-            <div class="stat-label">${t('Включённых ловушек')}</div>
+            <div class="stat-value" style="color: var(--viz-attack);">${escapeHtml(d ? d.warnings : s.warnings24h ?? 0)}</div>
+            <div class="stat-label">${d ? `${t('Атаки')} · ${period}` : t('Предупреждения (за 24ч)')}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color: #f59e0b;">${escapeHtml(s.warnings24h ?? 0)}</div>
-            <div class="stat-label">${t('Предупреждения (за 24ч)')}</div>
+            <div class="stat-value" style="color: var(--text-main);">${escapeHtml(d ? d.uniqueSources : '—')}</div>
+            <div class="stat-label">${t('Разных IP-адресов')} · ${period}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value">${escapeHtml(s.totalEvents ?? 0)}</div>
-            <div class="stat-label">${t('Всего событий')}</div>
+            <div class="stat-value" style="color: var(--text-main);">${escapeHtml(d ? d.events : s.totalEvents ?? 0)}</div>
+            <div class="stat-label">${d ? `${t('Событий')} · ${period}` : t('Всего событий')}</div>
         </div>
     `;
 }
 
-//Рисует детализацию по активным ловушкам на вкладке "Статистика"
-function renderTrapDetails() {
-    const container = document.getElementById('traps-detail-container');
-    if (!container) return;
+// --- Дашборд: графики на вкладке «Статистика» ---
+// Одна пара цветов на всех графиках: атаки (auth/scan/token) и прочие события.
 
-    const active = state.traps.filter(trap => trap.enabled);
-    if (active.length === 0) {
-        container.innerHTML = `<p style="color: var(--text-muted);">${t('Данных пока нет.')}</p>`;
+const ATTACK_TYPES = new Set(['auth', 'scan', 'token']);
+let dashRenderedKey = null; // данные, язык и ширина последнего рендера: без изменений не перерисовываем
+let chartTips = [];         // содержимое тултипов; элементы ссылаются на него через data-tip
+
+function renderDashboard() {
+    syncRangeSwitch();
+    const act = document.getElementById('dash-activity');
+    if (!act) return;
+
+    const d = state.dashboard;
+    const width = act.clientWidth; // 0, пока вкладка скрыта: график дорисуется при переключении
+    const key = JSON.stringify([d, state.currentLang, width, state.loading && !d]);
+    if (key === dashRenderedKey) return;
+    dashRenderedKey = key;
+    chartTips = [];
+    hideChartTip();
+
+    const ids = ['dash-activity', 'dash-sources', 'dash-traps', 'dash-types', 'dash-usernames', 'dash-passwords'];
+    if (!d) {
+        const msg = state.loading ? t('Загрузка...') : t('Данных пока нет.');
+        ids.forEach(id => { document.getElementById(id).innerHTML = `<p class="chart-empty">${msg}</p>`; });
+        document.getElementById('dash-activity-table').innerHTML = '';
         return;
     }
 
-    container.innerHTML = active.map(trap => `
-        <div class="trap-item" data-trap-id="${trap.id}">
-            <div class="trap-title">${escapeHtml(trap.name)}</div>
-            <div class="trap-info"><span>${t('Хост')}</span>: ${escapeHtml(trapHostName(trap))}</div>
-            <div class="trap-info"><span>${t('Всего событий')}</span>: ${escapeHtml(trap.totalEvents ?? 0)}</div>
-            <div class="trap-info"><span>${t('Последнее')}</span>: ${escapeHtml(trap.lastEventAt ?? '—')}</div>
-        </div>
-    `).join('');
+    act.innerHTML = width ? activityChartSvg(d, width) : '';
+    document.getElementById('dash-activity-table').innerHTML = activityTable(d);
+
+    document.getElementById('dash-sources').innerHTML = hbars(d.topSources.map(s => ({
+        label: s.ip, mono: true, attack: s.warnings, other: s.events - s.warnings,
+        tip: {
+            title: s.ip,
+            rows: [
+                ...splitRows(s.warnings, s.events - s.warnings),
+                { label: t('Ловушек задето'), value: s.traps },
+                { label: t('Последнее событие'), value: formatClock(s.lastTs, true) }
+            ]
+        }
+    })));
+
+    document.getElementById('dash-traps').innerHTML = hbars(d.byTrap.map(tr => ({
+        label: tr.name, attack: tr.warnings, other: tr.events - tr.warnings, trapId: tr.trapId,
+        tip: { title: tr.name, rows: splitRows(tr.warnings, tr.events - tr.warnings) }
+    })));
+
+    document.getElementById('dash-types').innerHTML = hbars(d.byType.map(ty => {
+        const label = t(EVENT_TYPE_LABELS[ty.key] || ty.key);
+        const attack = ATTACK_TYPES.has(ty.key);
+        return {
+            label, attack: attack ? ty.count : 0, other: attack ? 0 : ty.count,
+            tip: { title: label, rows: [{ key: attack ? 'attack' : 'other', label: attack ? t('Атаки') : t('Прочие события'), value: ty.count }] }
+        };
+    }));
+
+    const credRows = list => list.map(c => ({
+        label: c.key, mono: true, attack: c.count, other: 0,
+        tip: { title: c.key, rows: [{ key: 'attack', label: t('Попыток входа'), value: c.count }] }
+    }));
+    document.getElementById('dash-usernames').innerHTML = hbars(credRows(d.topUsernames));
+    document.getElementById('dash-passwords').innerHTML = hbars(credRows(d.topPasswords));
+}
+
+function splitRows(attack, other) {
+    return [
+        { key: 'attack', label: t('Атаки'), value: attack },
+        { key: 'other', label: t('Прочие события'), value: other },
+        { label: t('Всего'), value: attack + other }
+    ];
+}
+
+function addTip(tip) {
+    chartTips.push(tip);
+    return chartTips.length - 1;
+}
+
+// Горизонтальные полосы: у каждой строки сегмент атак и сегмент прочих, общий масштаб — максимум строки.
+function hbars(rows) {
+    if (!rows.length) return `<p class="chart-empty">${t('За этот период данных нет.')}</p>`;
+    const max = Math.max(1, ...rows.map(r => r.attack + r.other));
+    return rows.map(r => {
+        const parts = [['attack', r.attack], ['other', r.other]].filter(([, v]) => v > 0);
+        const gap = parts.length > 1 ? ' - 1px' : '';
+        const segs = parts.map(([cls, v]) =>
+            `<div class="hbar-seg ${cls}" style="width: calc(${(v / max * 100).toFixed(2)}%${gap})"></div>`).join('');
+        const click = r.trapId != null ? ` clickable" data-trap-id="${r.trapId}` : '';
+        return `
+            <div class="hbar${click}" tabindex="0" data-tip="${addTip(r.tip)}">
+                <div class="hbar-label${r.mono ? ' mono' : ''}">${escapeHtml(r.label)}</div>
+                <div class="hbar-track">${segs}</div>
+                <div class="hbar-value">${escapeHtml(r.attack + r.other)}</div>
+            </div>`;
+    }).join('');
+}
+
+// Ровные деления оси: шаг 1/2/5·10ⁿ, около четырёх делений; пустой график — шкала 0–4.
+function niceTicks(max) {
+    max = Math.max(max, 4);
+    const raw = Math.max(1, max / 4);
+    const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 5, 10].map(m => m * pow).find(v => v >= raw);
+    const ticks = [];
+    for (let v = 0; v < max + step; v += step) ticks.push(v);
+    return ticks;
+}
+
+// Прямоугольник со скруглёнными верхними углами: столбец «стоит» на оси.
+function roundedTopRect(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h);
+    return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+}
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function formatClock(ts, withDate) {
+    const dt = new Date(ts * 1000);
+    const time = `${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+    return withDate ? `${pad2(dt.getDate())}.${pad2(dt.getMonth() + 1)} ${time}` : time;
+}
+
+function bucketTitle(d, b) {
+    const multiDay = d.until - d.since > 86400;
+    return `${formatClock(b.ts, multiDay)} – ${formatClock(b.ts + d.bucketSeconds, multiDay)}`;
+}
+
+// Столбцы активности: атаки внизу, прочие сверху, между сегментами зазор 2px.
+function activityChartSvg(d, width) {
+    const H = 220, M = { top: 10, right: 6, bottom: 26, left: 38 };
+    const plotW = width - M.left - M.right, plotH = H - M.top - M.bottom;
+    const n = d.timeline.length;
+    const ticks = niceTicks(Math.max(...d.timeline.map(b => b.events)));
+    const yMax = ticks[ticks.length - 1];
+    const slot = plotW / n;
+    const barW = Math.max(2, slot - Math.max(2, Math.min(8, slot * 0.3)));
+    const base = M.top + plotH;
+    const h = v => v / yMax * plotH;
+
+    const grid = ticks.map(v => {
+        const y = base - h(v);
+        return `<line class="${v === 0 ? 'baseline' : 'grid'}" x1="${M.left}" x2="${width - M.right}" y1="${y}" y2="${y}"/>`
+            + `<text x="${M.left - 6}" y="${y + 4}" text-anchor="end">${v}</text>`;
+    }).join('');
+
+    const multiDay = d.until - d.since > 86400;
+    const every = Math.max(1, Math.ceil((multiDay ? 84 : 44) / slot));
+    let bars = '', labels = '', hits = '';
+    d.timeline.forEach((b, i) => {
+        const x = M.left + i * slot + (slot - barW) / 2;
+        const ha = h(b.warnings), ho = h(b.events - b.warnings);
+        if (ho > 0) {
+            const top = ha > 0 ? Math.max(1, ho - 2) : ho;
+            const y = base - ha - (ha > 0 ? 2 : 0) - top;
+            bars += `<path class="seg-other" d="${roundedTopRect(x, y, barW, top, 4)}"/>`;
+        }
+        if (ha > 0) {
+            bars += ho > 0
+                ? `<rect class="seg-attack" x="${x}" y="${base - ha}" width="${barW}" height="${ha}"/>`
+                : `<path class="seg-attack" d="${roundedTopRect(x, base - ha, barW, ha, 4)}"/>`;
+        }
+        if ((n - 1 - i) % every === 0) {
+            labels += `<text x="${M.left + i * slot + slot / 2}" y="${H - 8}" text-anchor="middle">${formatClock(b.ts, multiDay)}</text>`;
+        }
+        const tip = addTip({ title: bucketTitle(d, b), rows: splitRows(b.warnings, b.events - b.warnings) });
+        hits += `<rect class="col-hit" tabindex="0" data-tip="${tip}" x="${M.left + i * slot}" y="${M.top}" width="${slot}" height="${plotH}"/>`;
+    });
+
+    return `<svg viewBox="0 0 ${width} ${H}" width="${width}" height="${H}" role="img"
+                aria-label="${escapeHtml(t('Активность'))}: ${d.events} · ${escapeHtml(t('Атаки'))}: ${d.warnings}">
+        ${grid}${hits}${bars}${labels}${d.events ? '' : `<text class="chart-empty-label" x="${M.left + plotW / 2}"
+            y="${M.top + plotH / 2}" text-anchor="middle">${escapeHtml(t('За этот период событий нет.'))}</text>`}</svg>`;
+}
+
+function activityTable(d) {
+    const rows = d.timeline.map(b => `<tr><td>${bucketTitle(d, b)}</td><td>${b.warnings}</td>`
+        + `<td>${b.events - b.warnings}</td><td>${b.events}</td></tr>`).join('');
+    return `<div class="chart-table-scroll"><table>
+        <thead><tr><th>${t('Время')}</th><th>${t('Атаки')}</th><th>${t('Прочие события')}</th><th>${t('Всего')}</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+}
+
+function syncRangeSwitch() {
+    document.querySelectorAll('#dash-range button').forEach(btn => {
+        const on = btn.dataset.range === state.dashRange;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+}
+
+async function setDashRange(range) {
+    if (!RANGE_LABELS[range] || range === state.dashRange) return;
+    state.dashRange = range;
+    try { localStorage.setItem(CONFIG.DASH_RANGE_KEY, range); } catch (e) {}
+    syncRangeSwitch();
+    await loadDashboard();
+    renderStats();
+    renderDashboard();
+}
+
+// Тултип строится через textContent: подписи (логины, пароли, имена) приходят от атакующих.
+function showChartTip(el, x, y) {
+    const tip = chartTips[Number(el.dataset.tip)];
+    const box = document.getElementById('chart-tooltip');
+    if (!tip || !box) return;
+    box.replaceChildren();
+    const title = document.createElement('div');
+    title.className = 'tt-title';
+    title.textContent = tip.title;
+    box.appendChild(title);
+    for (const r of tip.rows) {
+        const row = document.createElement('div');
+        row.className = 'tt-row';
+        if (r.key) {
+            const k = document.createElement('i');
+            k.className = `tt-key ${r.key}`;
+            row.appendChild(k);
+        }
+        const v = document.createElement('strong');
+        v.textContent = r.value;
+        row.append(v, document.createTextNode(' ' + r.label));
+        box.appendChild(row);
+    }
+    box.hidden = false;
+    const w = box.offsetWidth, h = box.offsetHeight;
+    let left = x + 14, top = y + 14;
+    if (left + w > window.innerWidth - 8) left = x - w - 14;
+    if (top + h > window.innerHeight - 8) top = y - h - 14;
+    box.style.left = `${Math.max(8, left)}px`;
+    box.style.top = `${Math.max(8, top)}px`;
+}
+
+function hideChartTip() {
+    const box = document.getElementById('chart-tooltip');
+    if (box) box.hidden = true;
+}
+
+function initDashboard() {
+    const stats = document.getElementById('stats');
+    if (!stats) return;
+
+    document.getElementById('dash-range').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-range]');
+        if (btn) setDashRange(btn.dataset.range);
+    });
+
+    stats.addEventListener('pointermove', (e) => {
+        const el = e.target.closest('[data-tip]');
+        if (el) showChartTip(el, e.clientX, e.clientY); else hideChartTip();
+    });
+    stats.addEventListener('pointerleave', hideChartTip);
+    stats.addEventListener('focusin', (e) => {
+        const el = e.target.closest('[data-tip]');
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        showChartTip(el, r.left + r.width / 2, r.top);
+    });
+    stats.addEventListener('focusout', hideChartTip);
+
+    // Строка ловушки открывает её события.
+    const openTrap = (e) => {
+        const row = e.target.closest('.hbar[data-trap-id]');
+        if (!row) return;
+        if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        state.selectedTrapId = Number(row.dataset.trapId);
+        hideChartTip();
+        switchTab('events', document.querySelector('.nav-link[data-tab="events"]'));
+    };
+    stats.addEventListener('click', openTrap);
+    stats.addEventListener('keydown', openTrap);
+
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => { if (state.currentTab === 'stats') renderDashboard(); }, 150);
+    });
 }
 
 // Заполняет селект ловушек на вкладке "События".
@@ -1028,7 +1325,7 @@ function renderAll() {
     renderHostView();
     renderTraps();
     renderStats();
-    renderTrapDetails();
+    renderDashboard();
     applyUserMenu();
     updateTrapActions();
 
@@ -1070,6 +1367,14 @@ async function loadStats() {
     }
 }
 
+async function loadDashboard() {
+    try {
+        state.dashboard = await api.getDashboard(state.dashRange) || null;
+    } catch (err) {
+        console.error('[loadDashboard]', err);
+    }
+}
+
 // Каталог классов и шаблонов нужен для формы создания и названий классов на карточках.
 async function loadCatalog() {
     try {
@@ -1089,7 +1394,7 @@ async function refreshAll() {
     renderTraps();
     renderStats();
 
-    await Promise.all([loadTraps(), loadStats()]);
+    await Promise.all([loadTraps(), loadStats(), loadDashboard()]);
 
     state.loading = false;
     renderAll();
@@ -1100,7 +1405,7 @@ async function refreshAll() {
 async function pollRefresh() {
     if (document.hidden || state.loading) return;
 
-    await Promise.all([loadTraps(), loadStats()]);
+    await Promise.all([loadTraps(), loadStats(), loadDashboard()]);
     if (state.loading) return;
     renderAll();
 
@@ -1800,6 +2105,10 @@ async function switchTab(tabId, clickedLink) {
     document.getElementById(tabId).classList.add('active');
 
     updateBreadcrumb();
+    hideChartTip();
+
+    // скрытая вкладка имеет нулевую ширину — график активности рисуем, когда она видна
+    if (tabId === 'stats') renderDashboard();
 
     // Специфика вкладки "События"
     if (tabId === 'events') {
@@ -2082,7 +2391,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             const el = document.getElementById('lang-switch');
             if (el) el.value = savedLang;
         }
+        const savedRange = localStorage.getItem(CONFIG.DASH_RANGE_KEY);
+        if (RANGE_LABELS[savedRange]) state.dashRange = savedRange;
     } catch (e) { /* localStorage может быть выключен */ }
+
+    initDashboard();
 
     // --- Вкладки ---
     document.querySelectorAll('.nav-link').forEach(link => {

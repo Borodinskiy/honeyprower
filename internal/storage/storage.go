@@ -49,15 +49,33 @@ type Storage interface {
 	InsertEvent(ctx context.Context, trapID int64, ev models.IngestEvent) (*models.Event, error)
 	ListFilterEvents(ctx context.Context, f models.EventFilter) ([]models.Event, error)
 
+	// AddDemoEvents stores generated demo events without touching the traps' last-seen.
+	AddDemoEvents(ctx context.Context, events []DemoEvent) error
+	// DeleteDemoEvents removes every demo event and returns how many were removed.
+	DeleteDemoEvents(ctx context.Context) (int, error)
+
 	// TouchTrap refreshes last-seen for a heartbeat (no event stored).
 	TouchTrap(ctx context.Context, token string) error
 
 	GetStats(ctx context.Context) (*models.Stats, error)
+	// GetDashboard aggregates events of the last window, split into buckets of the given size;
+	// buckets are aligned to local time of the given UTC offset.
+	GetDashboard(ctx context.Context, window, bucket, utcOffset time.Duration) (*models.Dashboard, error)
 
 	// --- users ---
 	CreateUser(ctx context.Context, u *models.User) (*models.User, error)
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetUserByID(ctx context.Context, id int64) (*models.User, error)
+}
+
+// DemoSessionPrefix marks demo events: their session starts with it.
+// Agents never produce it, so demo events can be removed without touching real ones.
+const DemoSessionPrefix = "demo-"
+
+// DemoEvent is one generated event of the demo traffic (see internal/demo).
+type DemoEvent struct {
+	TrapID int64
+	Event  models.IngestEvent
 }
 
 // hostKey normalizes what makes two hosts the same server.

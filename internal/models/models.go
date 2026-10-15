@@ -200,3 +200,47 @@ type AuthResponse struct {
 	Token string `json:"token"`
 	User  *User  `json:"user"`
 }
+
+// Dashboard — агрегаты событий за окно [Since, Until) для графиков на главной.
+type Dashboard struct {
+	Since         float64 `json:"since"`
+	Until         float64 `json:"until"`
+	BucketSeconds int     `json:"bucketSeconds"`
+	Events        int     `json:"events"`        // всего событий в окне
+	Warnings      int     `json:"warnings"`      // из них auth/scan/token
+	UniqueSources int     `json:"uniqueSources"` // разных IP-источников
+
+	Timeline     []TimeBucket  `json:"timeline"` // по порядку, без пропусков, пустые ведра — нули
+	ByType       []KeyCount    `json:"byType"`
+	ByTrap       []TrapCount   `json:"byTrap"`
+	TopSources   []SourceCount `json:"topSources"`
+	TopUsernames []KeyCount    `json:"topUsernames"`
+	TopPasswords []KeyCount    `json:"topPasswords"`
+}
+
+// TimeBucket — события одного интервала времени, TS — его начало.
+type TimeBucket struct {
+	TS       float64 `json:"ts"`
+	Events   int     `json:"events"`
+	Warnings int     `json:"warnings"`
+}
+
+type KeyCount struct {
+	Key   string `json:"key"`
+	Count int    `json:"count"`
+}
+
+type TrapCount struct {
+	TrapID   int64  `json:"trapId"`
+	Name     string `json:"name"`
+	Events   int    `json:"events"`
+	Warnings int    `json:"warnings"`
+}
+
+type SourceCount struct {
+	IP       string  `json:"ip"`
+	Events   int     `json:"events"`
+	Warnings int     `json:"warnings"`
+	Traps    int     `json:"traps"` // сколько разных ловушек задел
+	LastTS   float64 `json:"lastTs"`
+}

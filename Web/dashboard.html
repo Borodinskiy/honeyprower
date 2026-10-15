@@ -49,8 +49,8 @@
             <div class="logo">🌐</div>
 
             <nav>
-                <a href="#" class="nav-link active" data-tab="traps">Хосты</a>
-                <a href="#" class="nav-link" data-tab="stats">Статистика</a>
+                <a href="#" class="nav-link active" data-tab="stats">Статистика</a>
+                <a href="#" class="nav-link" data-tab="traps">Хосты</a>
                 <a href="#" class="nav-link" data-tab="events">События</a>
             </nav>
         </div>
@@ -79,11 +79,11 @@
     <!-- Контент -->
     <main>
         <div class="breadcrumbs">
-            <a href="#">Главная</a> / <span id="current-tab-crumb">Хосты</span>
+            <a href="#">Главная</a> / <span id="current-tab-crumb">Статистика</span>
         </div>
 
         <!-- ВКЛАДКА 1: ХОСТЫ И ИХ ЛОВУШКИ -->
-        <section id="traps" class="tab-content active">
+        <section id="traps" class="tab-content">
 
             <!-- Список хостов -->
             <div id="hosts-view">
@@ -141,13 +141,61 @@
         </section>
 
         <!-- ВКЛАДКА 2: СТАТИСТИКА -->
-        <section id="stats" class="tab-content">
-            <h1>Статистика</h1>
+        <section id="stats" class="tab-content active">
+            <div class="traps-header">
+                <h1>Статистика</h1>
+                <div class="range-switch" id="dash-range" role="group" aria-label="Период">
+                    <button type="button" data-range="1h">1 ч</button>
+                    <button type="button" data-range="24h">24 ч</button>
+                    <button type="button" data-range="7d">7 дн</button>
+                </div>
+            </div>
 
             <div class="stats-grid" id="stats-container"></div>
 
-            <h2 style="font-size: 18px; margin-bottom: 15px;">Детализация по активным ловушкам</h2>
-            <div class="traps-list" id="traps-detail-container"></div>
+            <div class="chart-card">
+                <div class="chart-head">
+                    <h2>Активность</h2>
+                    <div class="chart-legend">
+                        <span><i class="key key-attack"></i>Атаки</span>
+                        <span><i class="key key-other"></i>Прочие события</span>
+                    </div>
+                </div>
+                <p class="chart-sub">Атаки — попытки входа, сканирования и срабатывания honeytoken.</p>
+                <div class="activity-chart" id="dash-activity"></div>
+                <details class="chart-table">
+                    <summary>Показать таблицей</summary>
+                    <div id="dash-activity-table"></div>
+                </details>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Самые активные IP</h2><div class="chart-legend"><span><i class="key key-attack"></i>Атаки</span><span><i class="key key-other"></i>Прочие события</span></div></div>
+                    <p class="chart-sub">Атаки и прочие события с одного адреса.</p>
+                    <div class="hbars" id="dash-sources"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Ловушки</h2><div class="chart-legend"><span><i class="key key-attack"></i>Атаки</span><span><i class="key key-other"></i>Прочие события</span></div></div>
+                    <p class="chart-sub">Нажмите на ловушку, чтобы открыть её события.</p>
+                    <div class="hbars" id="dash-traps"></div>
+                </div>
+            </div>
+
+            <div class="charts-grid charts-grid-3">
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Типы событий</h2><div class="chart-legend"><span><i class="key key-attack"></i>Атаки</span><span><i class="key key-other"></i>Прочие события</span></div></div>
+                    <div class="hbars" id="dash-types"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Частые логины</h2></div>
+                    <div class="hbars" id="dash-usernames"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Частые пароли</h2></div>
+                    <div class="hbars" id="dash-passwords"></div>
+                </div>
+            </div>
         </section>
 
         <!-- ВКЛАДКА 3: СОБЫТИЯ -->
@@ -359,6 +407,7 @@
         </div>
     </div>
 
+    <div class="chart-tooltip" id="chart-tooltip" hidden></div>
     <script src="script.js"></script>
 </body>
 </html>

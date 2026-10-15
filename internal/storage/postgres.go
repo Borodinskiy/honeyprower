@@ -553,6 +553,155 @@ func (p *Postgres) GetStats(ctx context.Context) (*models.Stats, error) {
 	return &s, nil
 }
 
+func (p *Postgres) AddDemoEvents(ctx context.Context, events []DemoEvent) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO events (trap_id, event_type, proto, src_ip, src_port, dst_port, session, username, password, data, ts)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, de := range events {
+		in := de.Event
+		data := in.Data
+		if len(data) == 0 {
+			data = json.RawMessage("{}")
+		}
+		if _, err := stmt.ExecContext(ctx, de.TrapID, in.EventType, nz(in.Proto, "tcp"), in.SrcIP, in.SrcPort,
+			in.DstPort, in.Session, in.Username, in.Password, []byte(data), in.TS); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (p *Postgres) DeleteDemoEvents(ctx context.Context) (int, error) {
+	res, err := p.db.ExecContext(ctx, `DELETE FROM events WHERE session LIKE $1`, DemoSessionPrefix+"%")
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// warnSQL — SQL-аналог isWarning: 1 для auth/scan/token, иначе 0.
+const warnSQL = `CASE WHEN event_type IN ('auth','scan','token') THEN 1 ELSE 0 END`
+
+func (p *Postgres) GetDashboard(ctx context.Context, window, bucket, utcOffset time.Duration) (*models.Dashboard, error) {
+	d := newDashboard(time.Now(), window, bucket, utcOffset)
+	inWindow := `ts >= $1 AND ts < $2`
+
+	err := p.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(`+warnSQL+`), 0), COUNT(DISTINCT NULLIF(src_ip, ''))
+		FROM events WHERE `+inWindow,
+		d.Since, d.Until).Scan(&d.Events, &d.Warnings, &d.UniqueSources)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT FLOOR((ts - $1) / $3)::int AS b, COUNT(*), SUM(`+warnSQL+`)
+		FROM events WHERE `+inWindow+` GROUP BY b`,
+		d.Since, d.Until, d.BucketSeconds)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var b, n, w int
+		if err := rows.Scan(&b, &n, &w); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if b >= 0 && b < len(d.Timeline) {
+			d.Timeline[b].Events, d.Timeline[b].Warnings = n, w
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if d.ByType, err = p.keyCounts(ctx, `
+		SELECT event_type, COUNT(*) AS n FROM events WHERE `+inWindow+`
+		GROUP BY event_type ORDER BY n DESC, event_type`, d.Since, d.Until); err != nil {
+		return nil, err
+	}
+	for _, col := range []struct {
+		name string
+		dst  *[]models.KeyCount
+	}{{"username", &d.TopUsernames}, {"password", &d.TopPasswords}} {
+		if *col.dst, err = p.keyCounts(ctx, `
+			SELECT `+col.name+`, COUNT(*) AS n FROM events
+			WHERE `+inWindow+` AND COALESCE(`+col.name+`, '') <> ''
+			GROUP BY `+col.name+` ORDER BY n DESC, `+col.name+` LIMIT $3`,
+			d.Since, d.Until, DashboardTop); err != nil {
+			return nil, err
+		}
+	}
+
+	rows, err = p.db.QueryContext(ctx, `
+		SELECT t.id, t.name, COUNT(*) AS n, SUM(`+warnSQL+`)
+		FROM events e JOIN traps t ON t.id = e.trap_id
+		WHERE e.ts >= $1 AND e.ts < $2
+		GROUP BY t.id, t.name ORDER BY n DESC, t.id LIMIT $3`,
+		d.Since, d.Until, DashboardTop)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var tc models.TrapCount
+		if err := rows.Scan(&tc.TrapID, &tc.Name, &tc.Events, &tc.Warnings); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		d.ByTrap = append(d.ByTrap, tc)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = p.db.QueryContext(ctx, `
+		SELECT src_ip, COUNT(*) AS n, SUM(`+warnSQL+`), COUNT(DISTINCT trap_id), MAX(ts)
+		FROM events WHERE `+inWindow+` AND src_ip <> ''
+		GROUP BY src_ip ORDER BY n DESC, src_ip LIMIT $3`,
+		d.Since, d.Until, DashboardTop)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sc models.SourceCount
+		if err := rows.Scan(&sc.IP, &sc.Events, &sc.Warnings, &sc.Traps, &sc.LastTS); err != nil {
+			return nil, err
+		}
+		d.TopSources = append(d.TopSources, sc)
+	}
+	return d, rows.Err()
+}
+
+func (p *Postgres) keyCounts(ctx context.Context, query string, args ...any) ([]models.KeyCount, error) {
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.KeyCount{}
+	for rows.Next() {
+		var kc models.KeyCount
+		if err := rows.Scan(&kc.Key, &kc.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, kc)
+	}
+	return out, rows.Err()
+}
+
 // ---------------- users ----------------
 
 func (p *Postgres) CreateUser(ctx context.Context, u *models.User) (*models.User, error) {

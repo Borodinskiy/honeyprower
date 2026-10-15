@@ -33,6 +33,8 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-}
       # Ключ шифрования SSH-паролей хостов. Пусто — ключ создаётся в томе appdata (data/secret.key).
       HF_SECRET_KEY: ${HF_SECRET_KEY:-}
+      # true — центр сам генерирует демо-атаки для показа дашборда; false — удаляет их при запуске.
+      DEMO_DATA: ${DEMO_DATA:-false}
     volumes:
       - appdata:/app/data
     ports:
