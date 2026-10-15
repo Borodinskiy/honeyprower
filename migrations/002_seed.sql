@@ -28,7 +28,7 @@ VALUES (
     'demo-scada-token', TRUE
 ),
 (
-    'High-Interaction Shell', 'high_interaction', '0.0.0.0', 2222,
+    'High-Interaction Shell', 'high_interaction', '0.0.0.0', 2224,
     '{"hostname":"substation-gw01","user":"root","banner":"Linux substation-gw01 5.15.0-88-generic #98-Ubuntu SMP Mon Oct 2 15:18:56 UTC 2023 x86_64\r\n\r\n"}'::jsonb,
     'demo-high-shell-token', TRUE
 )

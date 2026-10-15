@@ -64,6 +64,9 @@ func (p *Postgres) initSchemaAndSeed(ctx context.Context) error {
 			return fmt.Errorf("apply seed: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, migrations.DemoKeysSQL); err != nil {
+		return fmt.Errorf("apply demo keys: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit init tx: %w", err)
 	}

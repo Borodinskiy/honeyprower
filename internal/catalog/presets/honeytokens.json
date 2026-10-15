@@ -5,21 +5,17 @@
   "tags": [
     "honeytoken"
   ],
-  "description": "Ссылка-маячок и учётка-приманка. Вход с учёткой в любую ловушку → событие token.",
+  "description": "Ссылка-маячок и учётка-приманка. Переход по ссылке или вход с учёткой в любую ловушку → событие token.",
   "params": {
-    "public_base_url": "http://127.0.0.1:8088",
     "tokens": [
       {
         "kind": "url",
         "label": "share/finance/README.html",
-        "token": "",
-        "username": "",
-        "password": ""
+        "token": ""
       },
       {
         "kind": "credentials",
         "label": "git/infra/.env",
-        "token": "",
         "username": "svc_backup",
         "password": ""
       }

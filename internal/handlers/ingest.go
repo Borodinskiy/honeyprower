@@ -43,7 +43,7 @@ func (h *Handlers) Ingest(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "event_type is required")
 		return
 	}
-	if _, err := h.Store.InsertEvent(r.Context(), trap.ID, in); err != nil {
+	if err := h.storeEvents(r.Context(), trap, []models.IngestEvent{in}); err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to store event")
 		return
 	}

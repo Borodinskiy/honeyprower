@@ -7,3 +7,6 @@ var SchemaSQL string
 
 //go:embed 002_seed.sql
 var SeedSQL string
+
+//go:embed 003_demo_keys.sql
+var DemoKeysSQL string

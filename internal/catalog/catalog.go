@@ -80,9 +80,9 @@ var classes = []Class{
 		DefaultParams: raw(`{"mode":"ssh_banner","delay_ms":10000,"max_hold_s":3600}`),
 	},
 	{
-		ID: "honeytoken", Title: "Honeytoken (приёмник ссылок)", Level: "Medium", Transport: "tcp", DefaultPort: 8088,
-		Description:   "HTTP-приёмник ссылок-приманок: переход по уникальной ссылке → событие token.",
-		DefaultParams: raw(`{"tokens":[{"label":"share/finance/README.html","token":""}]}`),
+		ID: "honeytoken", Title: "Honeytoken (ссылки и учётки)", Level: "Medium", Transport: "tcp", DefaultPort: 8088,
+		Description:   "Ссылки и учётки-приманки. Переход по ссылке или вход с учёткой в любую ловушку → событие token.",
+		DefaultParams: raw(`{"tokens":[{"kind":"url","label":"share/finance/README.html","token":""}]}`),
 	},
 	{
 		ID: "udp", Title: "UDP-ответчик", Level: "Low", Transport: "udp", DefaultPort: 1053,

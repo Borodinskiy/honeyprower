@@ -23,6 +23,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_BUFFER: usize = 50_000;
 
+/// Больше конверт в одну UDP-датаграмму не помещается (65507 минус запас).
+pub const UDP_MAX_ENVELOPE: usize = 60_000;
+
 /// Когда отправитель ловушки последний раз доставил события в центр. Heartbeat
 /// той же ловушки по нему пропускает свой такт (piggybacking). У каждой ловушки
 /// свои часы: иначе события одной гасили бы heartbeat'ы остальных.
@@ -340,6 +343,29 @@ fn flush_envelopes(
     sent
 }
 
+/// Запечатывает события в конверты. Для udp_burst пачка делится пополам,
+/// пока каждый конверт не поместится в датаграмму; событие, которое не
+/// помещается и одно, отбрасывается — иначе оно навсегда застряло бы в буфере.
+pub fn seal_events(cfg: &Config, events: &[Event]) -> Vec<Vec<u8>> {
+    match crate::crypto::seal_envelope(&cfg.server_pub_key, &cfg.token, "ingest", events) {
+        Ok(env) if cfg.transport != "udp_burst" || env.len() <= UDP_MAX_ENVELOPE => vec![env],
+        Ok(_) if events.len() > 1 => {
+            let (a, b) = events.split_at(events.len() / 2);
+            let mut out = seal_events(cfg, a);
+            out.extend(seal_events(cfg, b));
+            out
+        }
+        Ok(env) => {
+            eprintln!("[sender] событие не помещается в UDP-датаграмму ({} байт), отброшено", env.len());
+            Vec::new()
+        }
+        Err(e) => {
+            eprintln!("[sender] ошибка seal_envelope: {e}");
+            Vec::new()
+        }
+    }
+}
+
 fn handle_events(
     cfg: &Config,
     agent: &ureq::Agent,
@@ -353,13 +379,7 @@ fn handle_events(
     }
 
     let envelopes_to_send: Vec<Vec<u8>> = if !cfg.server_pub_key.is_empty() {
-        match crate::crypto::seal_envelope(&cfg.server_pub_key, &cfg.token, "ingest", &events) {
-            Ok(env) => vec![env],
-            Err(e) => {
-                eprintln!("[sender] ошибка seal_envelope: {e}");
-                return;
-            }
-        }
+        seal_events(cfg, &events)
     } else {
         events
             .iter()
@@ -740,6 +760,43 @@ mod tests {
         let res = send_http_nolinger(&host_port, "/error", b"payload");
         assert!(res.is_err());
         handle.join().unwrap();
+    }
+
+    fn seal_cfg(transport: &str) -> Config {
+        serde_json::from_value(serde_json::json!({
+            "center_url": "http://127.0.0.1:8080",
+            "token": "tok",
+            "server_pub_key": "11".repeat(32),
+            "transport": transport,
+            "center_udp": "127.0.0.1:9099",
+        }))
+        .unwrap()
+    }
+
+    fn noisy_events(n: usize) -> Vec<Event> {
+        (0..n)
+            .map(|_| {
+                let noise: String = (0..1500).map(|_| format!("{:02x}", rand::random::<u8>())).collect();
+                Event::new("x", "data").data(serde_json::json!({ "noise": noise }))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn udp_burst_splits_batches_to_fit_datagrams() {
+        let events = noisy_events(200);
+        let http = seal_events(&seal_cfg("http_nolinger"), &events);
+        assert_eq!(http.len(), 1, "HTTP шлёт пачку одним конвертом");
+        assert!(http[0].len() > UDP_MAX_ENVELOPE);
+
+        let udp = seal_events(&seal_cfg("udp_burst"), &events);
+        assert!(udp.len() > 1);
+        assert!(udp.iter().all(|e| e.len() <= UDP_MAX_ENVELOPE), "каждый конверт помещается в датаграмму");
+
+        let huge = vec![Event::new("x", "data").data(serde_json::json!({
+            "noise": (0..150_000).map(|_| format!("{:02x}", rand::random::<u8>())).collect::<String>()
+        }))];
+        assert!(seal_events(&seal_cfg("udp_burst"), &huge).is_empty(), "неотправимое событие отбрасывается");
     }
 
     #[test]

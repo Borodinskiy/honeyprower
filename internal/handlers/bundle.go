@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -54,6 +56,7 @@ type agentConfig struct {
 	Token         string      `json:"token,omitempty"`
 	ServerPubKey  string      `json:"server_pub_key,omitempty"`
 	Transport     string      `json:"transport,omitempty"`
+	CenterUDP     string      `json:"center_udp,omitempty"`
 	StealthPaths  []string    `json:"stealth_paths,omitempty"`
 	JitterS       int         `json:"jitter_s,omitempty"`
 	VerifyTLS     bool        `json:"verify_tls"`
@@ -66,9 +69,15 @@ type agentConfig struct {
 }
 
 func (h *Handlers) baseConfig(r *http.Request) agentConfig {
+	center := h.centerURL(r)
+	transport, udp := "http_nolinger", ""
+	if h.AgentTransport == "udp_burst" {
+		transport, udp = "udp_burst", h.centerUDP(center)
+	}
 	return agentConfig{
-		CenterURL:     h.centerURL(r),
-		Transport:     "http_nolinger",
+		CenterURL:     center,
+		Transport:     transport,
+		CenterUDP:     udp,
 		StealthPaths:  []string{"/cdn-cgi/rum", "/v1/rgstr", "/api/v2/metrics"},
 		JitterS:       10,
 		VerifyTLS:     true,
@@ -152,6 +161,21 @@ func (h *Handlers) centerURL(r *http.Request) string {
 		host = "127.0.0.1:8080"
 	}
 	return scheme + "://" + host
+}
+
+// centerUDP — адрес UDP-приёмника для агентов: CenterUDP, где пустой хост
+// заменяется хостом из адреса центра.
+func (h *Handlers) centerUDP(center string) string {
+	host, port, err := net.SplitHostPort(h.CenterUDP)
+	if err != nil || port == "" {
+		return h.CenterUDP
+	}
+	if host == "" {
+		if u, err := url.Parse(center); err == nil {
+			host = u.Hostname()
+		}
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // Возвращает информацию об скачиваемой ловушке

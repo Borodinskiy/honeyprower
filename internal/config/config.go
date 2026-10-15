@@ -22,6 +22,12 @@ type Config struct {
 	DemoData          bool   // генерировать демо-трафик атак для показа дашборда (internal/demo)
 	PublicURL         string // внешний адрес центра для агентов (в config.json); пусто — из запроса
 
+	// Транспорт событий агентов: http_nolinger или udp_burst. Для udp_burst центр
+	// слушает UDPAddr, а агенты шлют на PublicUDP (пустой хост — хост центра).
+	AgentTransport string
+	UDPAddr        string
+	PublicUDP      string
+
 	// Ключ шифрования SSH-доступа к хостам: HF_SECRET_KEY (64 hex, base64 32 байт
 	// или фраза от 16 символов), иначе файл SecretKeyFile, создаваемый при первом запуске.
 	SecretKey     string
@@ -41,6 +47,10 @@ func Load() *Config {
 		FallbackInMemory:  getbool("FALLBACK_INMEMORY", false),
 		DemoData:          getbool("DEMO_DATA", false),
 		PublicURL:         os.Getenv("PUBLIC_URL"),
+
+		AgentTransport: getenv("AGENT_TRANSPORT", "http_nolinger"),
+		UDPAddr:        os.Getenv("UDP_INGEST_ADDR"),
+		PublicUDP:      os.Getenv("PUBLIC_UDP_ADDR"),
 
 		SecretKey:     os.Getenv("HF_SECRET_KEY"),
 		SecretKeyFile: getenv("HF_SECRET_KEY_FILE", "data/secret.key"),
