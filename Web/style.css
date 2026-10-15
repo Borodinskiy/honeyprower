@@ -751,52 +751,150 @@ body.dark-theme .event-type { color: var(--color-accent); }
 
 /* --- Класс-ориентированное создание ловушек и события агента --- */
 .modal-content.modal-wide { max-width: 680px; }
-.modal-content.modal-wide,
+.modal-content.modal-wide:not(.trap-modal),
 .modal-content:has(#created-token) { max-height: 92vh; overflow-y: auto; }
 .modal-content:has(#created-token) { max-width: 520px; }
 
-/* --- Форма параметров ловушки --- */
-.params-block { margin-top: 20px; }
-.params-head {
+/* --- Окно ловушки: шапка и низ на месте, прокручивается середина --- */
+.modal-content.trap-modal {
+    max-width: 960px;
+    max-height: 92vh;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.trap-modal > form { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.modal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+.modal-header h2 { font-size: 18px; margin: 0; }
+.modal-header .close-btn { position: static; line-height: 1; }
+.modal-body { padding: 20px 24px; overflow-y: auto; flex: 1; min-height: 0; }
+.modal-footer { padding: 12px 24px; border-top: 1px solid var(--border-color); }
+.modal-footer .auth-error-message { margin-bottom: 10px; text-align: left; }
+.modal-footer-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.modal-footer-actions { display: flex; gap: 8px; }
+
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 20px;
+    align-items: start;
+}
+.form-grid > .span-all { grid-column: 1 / -1; }
+.form-grid > p.field-help { margin: -6px 0 15px; }
+
+.form-section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 8px 0 14px;
+    padding-top: 16px;
     border-top: 1px solid var(--border-color);
-    padding-top: 14px;
-    margin-bottom: 12px;
 }
-.params-title { font-weight: 600; font-size: 15px; }
-.link-btn {
-    background: none;
-    border: none;
-    color: var(--color-accent);
-    cursor: pointer;
-    font-size: 13px;
-    padding: 0;
-}
-.link-btn:hover { text-decoration: underline; }
+.form-section-head h3 { font-size: 15px; margin: 0; }
+
 .form-group input.mono,
 .form-group textarea.mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
-.form-group textarea.param-text { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
 
-details.params-advanced {
-    margin: 6px 0 15px;
-    border: 1px dashed var(--border-color);
-    border-radius: 6px;
-    padding: 0 12px;
-}
-details.params-advanced[open] { padding-bottom: 4px; }
+details.params-advanced { margin: 0 0 15px; border-top: 1px solid var(--border-color); }
 details.params-advanced > summary {
     cursor: pointer;
-    padding: 9px 0;
+    padding: 10px 0;
     font-size: 13px;
     color: var(--text-muted);
     user-select: none;
 }
 details.params-advanced > summary:hover { color: var(--text-main); }
 
-.param-list-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-.param-list > .field-help { margin: 0 0 10px; }
+/* --- Списки параметров: таблица, строка на элемент --- */
+.param-list-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; }
+.param-list-title { font-size: 13px; font-weight: 600; }
+.param-list > .field-help { margin: 0 0 8px; }
+.table-scroll { overflow-x: auto; border: 1px solid var(--border-color); border-radius: 4px; }
+.param-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.param-table th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 6px 8px;
+    background: var(--bg-body);
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+.param-table td { padding: 0; border-bottom: 1px solid var(--border-color); vertical-align: middle; }
+.param-table tbody tr:last-child td { border-bottom: 0; }
+.param-table td + td, .param-table th + th { border-left: 1px solid var(--border-color); }
+/* поля прямо в ячейке — без рамки, как в таблице; селектор сильнее общих правил .form-group (и тёмной темы) */
+.form-group .param-table td > input[type="text"],
+.form-group .param-table td > input[type="number"],
+.form-group .param-table td > select {
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-main);
+    padding: 8px;
+    font-size: 13px;
+    outline: none;
+}
+.form-group .param-table td > input.mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; }
+.form-group .param-table td > input:focus,
+.form-group .param-table td > select:focus { box-shadow: inset 0 0 0 2px var(--color-accent); }
+.form-group .param-table td > select option { background: var(--white); color: var(--text-main); }
+.param-table .col-num { width: 32px; text-align: center; color: var(--text-muted); }
+.param-table .col-int, .param-table .col-number { width: 80px; }
+.param-table .col-enum { width: 170px; }
+.param-table .col-bool { width: 1%; text-align: center; padding: 0 10px; }
+.param-table th.col-bool { padding: 6px 10px; }
+.param-table .col-actions { width: 1%; white-space: nowrap; text-align: right; padding: 0 4px; }
+.param-table tr.is-open > td { background: var(--bg-body); }
+.param-table tr.row-extra > td { padding: 12px 12px 0 44px; background: var(--bg-body); }
+.param-table .table-empty { padding: 12px; color: var(--text-muted); text-align: center; }
+.table-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    border-radius: 3px;
+    padding: 3px 6px;
+    margin: 0 1px;
+    font-size: 12px;
+    cursor: pointer;
+    line-height: 1.2;
+}
+.table-btn:hover:not(:disabled) { color: var(--text-main); border-color: var(--border-color); }
+.table-btn.active { color: var(--text-main); border-color: var(--border-color); }
+.table-btn.danger:hover:not(:disabled) { color: var(--color-danger); border-color: var(--color-danger); }
+.table-btn:disabled { opacity: 0.3; cursor: default; }
+.col-help {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 3px 12px;
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+.col-help dt { font-weight: 600; }
+.col-help dd { margin: 0; }
+.btn.btn-small { padding: 6px 14px; font-size: 13px; }
+
+@media (max-width: 700px) {
+    .form-grid { grid-template-columns: minmax(0, 1fr); }
+    .modal-header, .modal-body, .modal-footer { padding-left: 16px; padding-right: 16px; }
+    .col-help { grid-template-columns: 1fr; }
+    .param-table { min-width: 640px; }
+    .param-table tr.row-extra > td { padding-left: 12px; }
+    .col-help dd { margin-bottom: 4px; }
+}
+
+.field-help { margin: 0 0 10px; }
 details.list-item {
     border: 1px solid var(--border-color);
     border-left: 3px solid var(--color-accent);

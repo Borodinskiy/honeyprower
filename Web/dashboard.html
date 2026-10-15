@@ -225,73 +225,70 @@
 
     <!-- МОДАЛЬНОЕ ОКНО СОЗДАНИЯ / РЕДАКТИРОВАНИЯ ЛОВУШКИ -->
     <div id="create-trap-modal" class="modal-overlay">
-        <div class="modal-content modal-wide">
-            <span class="close-btn" data-close-modal="create-trap-modal">&times;</span>
-            <h2 id="trap-modal-title">Создание новой ловушки</h2>
+        <div class="modal-content modal-wide trap-modal">
+            <div class="modal-header">
+                <h2 id="trap-modal-title">Создание новой ловушки</h2>
+                <span class="close-btn" data-close-modal="create-trap-modal">&times;</span>
+            </div>
 
             <form id="create-trap-form">
-                <div class="form-group">
-                    <label>Название ловушки</label>
-                    <input type="text" id="trap-name" required placeholder="Например: SSH Honeypot">
-                </div>
-
-                <div class="form-group">
-                    <label for="trap-host">Хост</label>
-                    <select id="trap-host" class="form-select"></select>
-                    <p class="field-help">Агент хоста запускает все его включённые ловушки, поэтому их порты не должны совпадать.</p>
-                </div>
-
-                <div class="form-group">
-                    <label>Класс ловушки</label>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <select id="trap-class" class="form-select" required style="flex: 1;"></select>
-                        <span id="trap-class-badge"></span>
+                <div class="modal-body">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="trap-name">Название ловушки</label>
+                            <input type="text" id="trap-name" required placeholder="Например: SSH Honeypot">
+                        </div>
+                        <div class="form-group">
+                            <label for="trap-host">Хост</label>
+                            <select id="trap-host" class="form-select"></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="trap-class">Класс ловушки</label>
+                            <select id="trap-class" class="form-select" required></select>
+                        </div>
+                        <div class="form-group" id="trap-preset-group">
+                            <label for="trap-preset">Шаблон (необязательно)</label>
+                            <select id="trap-preset" class="form-select">
+                                <option value="">— Без шаблона —</option>
+                            </select>
+                        </div>
+                        <p class="field-help span-all" id="trap-class-help"></p>
+                        <div class="form-group">
+                            <label for="trap-bind">Адрес (bind)</label>
+                            <input type="text" id="trap-bind" value="0.0.0.0" placeholder="0.0.0.0">
+                        </div>
+                        <div class="form-group" id="trap-port-group">
+                            <label for="trap-port">Порт</label>
+                            <input type="number" id="trap-port" min="1" max="65535" placeholder="2222">
+                        </div>
+                        <div class="form-group" id="trap-ports-group" style="display:none;">
+                            <label for="trap-ports">Порты (через запятую, диапазоны через дефис)</label>
+                            <input type="text" id="trap-ports" placeholder="9000-9003,10443">
+                        </div>
+                        <p class="field-help span-all">Агент хоста запускает все его включённые ловушки, поэтому их порты не должны совпадать.</p>
                     </div>
-                    <p class="field-help" id="trap-class-help"></p>
-                </div>
 
-                <div class="form-group" id="trap-preset-group">
-                    <label>Шаблон (необязательно)</label>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <select id="trap-preset" class="form-select" style="flex: 1;">
-                            <option value="">— Без шаблона —</option>
-                        </select>
-                        <span id="trap-preset-badge"></span>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label>Адрес (bind)</label>
-                    <input type="text" id="trap-bind" value="0.0.0.0" placeholder="0.0.0.0">
-                </div>
-
-                <div class="form-group" id="trap-port-group">
-                    <label>Порт</label>
-                    <input type="number" id="trap-port" min="1" max="65535" placeholder="2222">
-                </div>
-
-                <div class="form-group" id="trap-ports-group" style="display:none;">
-                    <label>Порты (через запятую, диапазоны через дефис)</label>
-                    <input type="text" id="trap-ports" placeholder="9000-9003,10443">
-                </div>
-
-                <div class="form-group params-block">
-                    <div class="params-head">
-                        <span class="params-title">Параметры ловушки</span>
-                        <button type="button" class="link-btn" id="params-mode-btn">Редактировать как JSON</button>
+                    <div class="form-section-head">
+                        <h3>Параметры ловушки</h3>
+                        <button type="button" class="btn btn-secondary btn-small" id="params-mode-btn">Редактировать как JSON</button>
                     </div>
                     <div id="params-form" class="params-form"></div>
-                    <textarea id="trap-params" class="code-input" rows="16" spellcheck="false" hidden></textarea>
+                    <textarea id="trap-params" class="code-input" rows="20" spellcheck="false" hidden></textarea>
                 </div>
 
-                <div id="trap-form-error" class="auth-error-message" hidden></div>
-
-                <div class="form-group checkbox-group">
-                    <input type="checkbox" id="trap-active" checked>
-                    <label for="trap-active">Запущена (агент должен работать)</label>
+                <div class="modal-footer">
+                    <div id="trap-form-error" class="auth-error-message" hidden></div>
+                    <div class="modal-footer-row">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="trap-active" checked>
+                            <label for="trap-active">Запущена (агент должен работать)</label>
+                        </div>
+                        <div class="modal-footer-actions">
+                            <button type="button" class="btn btn-secondary" data-close-modal="create-trap-modal">Отмена</button>
+                            <button type="submit" class="btn btn-success">Сохранить</button>
+                        </div>
+                    </div>
                 </div>
-
-                <button type="submit" class="btn btn-success full-width">Сохранить</button>
             </form>
         </div>
     </div>

@@ -454,6 +454,10 @@ const I18N_DICT = {
     "Всего": "Total",
     "За этот период данных нет.": "No data for this period.",
     "За этот период событий нет.": "No events in this period.",
+    "Выше": "Up",
+    "Ниже": "Down",
+    "Пока пусто.": "Empty for now.",
+    "У этого класса нет параметров.": "This class has no parameters.",
     "Ловушки не найдены.": "No traps found.",
     "Ошибка загрузки данных.": "Failed to load data.",
     "Не удалось создать ловушку.": "Failed to create trap.",
@@ -1465,7 +1469,7 @@ const paramForm = {
     classId: '',
     params: {},             // редактируемый объект; ключи вне схемы сохраняются как есть
     jsonMode: false,
-    collapsed: new WeakSet(), // свёрнутые элементы списков (по объекту — переживает перестановку)
+    expanded: new WeakSet(),  // строки списков с раскрытыми редкими полями (по объекту — переживает перестановку)
     advOpen: new Set()        // раскрытые блоки «Дополнительно» (по пути)
 };
 
@@ -1532,52 +1536,50 @@ function renderParamsForm() {
     root.replaceChildren();
     const cls = currentClass();
     if (!cls) return;
+    if (!(cls.fields || []).length) {
+        root.append(el('p', { class: 'field-help' }, t('У этого класса нет параметров.')));
+        return;
+    }
     root.append(...renderFieldGroup(cls.fields || [], paramForm.params, '', 'Дополнительные параметры'));
 }
 
-// Обычные поля + раскрывающийся блок с редкими.
+// Поля в две колонки; длинный текст, списки и флажки — на всю ширину. Редкие поля — в раскрывающемся блоке.
 function renderFieldGroup(fields, obj, path, advLabel) {
     const out = [];
     const basic = fields.filter(f => !f.advanced && isVisible(f, obj));
     const adv = fields.filter(f => f.advanced && isVisible(f, obj));
-    basic.forEach(f => out.push(renderField(f, obj, path)));
+    if (basic.length) out.push(el('div', { class: 'form-grid' }, ...basic.map(f => renderField(f, obj, path))));
     if (adv.length) {
         const key = path + '#adv';
-        const details = el('details', {
+        out.push(el('details', {
             class: 'params-advanced',
             open: paramForm.advOpen.has(key),
             ontoggle: (e) => { e.target.open ? paramForm.advOpen.add(key) : paramForm.advOpen.delete(key); }
-        }, el('summary', {}, `${t(advLabel)} (${adv.length})`));
-        adv.forEach(f => details.append(renderField(f, obj, path)));
-        out.push(details);
+        },
+            el('summary', {}, `${t(advLabel)} (${adv.length})`),
+            el('div', { class: 'form-grid' }, ...adv.map(f => renderField(f, obj, path)))));
     }
     return out;
 }
 
-function renderField(f, obj, path) {
-    if (f.type === 'list') return renderList(f, obj, path);
+function fieldId(path, f) {
+    return 'pf-' + (path + f.key).replace(/[^a-zA-Z0-9_-]/g, '-');
+}
 
-    const id = 'pf-' + (path + f.key).replace(/[^a-zA-Z0-9_-]/g, '-');
-    const help = f.help ? el('p', { class: 'field-help' }, f.help) : null;
+// Поле ввода без подписи: общее для формы и ячеек таблицы списка.
+function fieldInput(f, obj, id) {
     const value = obj[f.key];
-
     if (f.type === 'bool') {
-        const cb = el('input', {
-            type: 'checkbox', id, checked: !!value,
-            onchange: (e) => { obj[f.key] = e.target.checked; }
-        });
-        return el('div', { class: 'form-group' },
-            el('div', { class: 'checkbox-group' }, cb, el('label', { htmlFor: id }, f.title)), help);
+        return el('input', { type: 'checkbox', id, checked: !!value, onchange: (e) => { obj[f.key] = e.target.checked; } });
     }
-
-    let input;
     if (f.type === 'enum') {
-        input = el('select', {
+        return el('select', {
             id, class: 'form-select',
             onchange: (e) => { obj[f.key] = e.target.value; renderParamsForm(); } // могут появиться/скрыться зависимые поля
         }, ...f.options.map(o => el('option', { value: o.value, selected: String(value ?? '') === o.value }, o.label)));
-    } else if (f.type === 'int' || f.type === 'number') {
-        input = el('input', {
+    }
+    if (f.type === 'int' || f.type === 'number') {
+        return el('input', {
             id, type: 'number', value: value ?? '', min: f.min, max: f.max,
             step: f.type === 'int' ? '1' : 'any',
             placeholder: f.default !== undefined ? String(f.default) : '',
@@ -1586,60 +1588,97 @@ function renderField(f, obj, path) {
                 if (v === '') delete obj[f.key]; else obj[f.key] = Number(v);
             }
         });
-    } else {
-        const attrs = {
-            id, value: toEditable(value), placeholder: f.placeholder || '',
-            class: [f.type === 'text' ? 'param-text' : '', (f.regex || f.hex) ? 'mono' : ''].join(' ').trim(),
-            oninput: (e) => { obj[f.key] = e.target.value; }
-        };
-        input = f.type === 'text' ? el('textarea', { ...attrs, rows: 3 }) : el('input', { ...attrs, type: 'text' });
-        input.spellcheck = false;
     }
-    return el('div', { class: 'form-group' }, el('label', { htmlFor: id }, f.title), input, help);
+    const attrs = {
+        id, value: toEditable(value), placeholder: f.placeholder || '',
+        class: (f.type === 'text' || f.regex || f.hex) ? 'mono' : '',
+        oninput: (e) => { obj[f.key] = e.target.value; }
+    };
+    const input = f.type === 'text' ? el('textarea', { ...attrs, rows: 3 }) : el('input', { ...attrs, type: 'text' });
+    input.spellcheck = false;
+    return input;
 }
 
-function listItemSummary(f, item) {
-    const s = (f.summary || []).map(k => toEditable(item[k])).filter(Boolean).join('  →  ');
-    return s.length > 70 ? s.slice(0, 69) + '…' : s;
+function renderField(f, obj, path) {
+    if (f.type === 'list') return renderList(f, obj, path);
+
+    const id = fieldId(path, f);
+    const help = f.help ? el('p', { class: 'field-help' }, f.help) : null;
+    if (f.type === 'bool') {
+        return el('div', { class: 'form-group span-all' },
+            el('div', { class: 'checkbox-group' }, fieldInput(f, obj, id), el('label', { htmlFor: id }, f.title)), help);
+    }
+    return el('div', { class: 'form-group' + (f.type === 'text' ? ' span-all' : '') },
+        el('label', { htmlFor: id }, f.title), fieldInput(f, obj, id), help);
 }
 
+// Список (правила, маршруты, токены) — таблица: строка на элемент, короткие поля — колонки.
+// Длинный текст и редкие поля открываются под строкой кнопкой «Ещё».
 function renderList(f, obj, path) {
     const items = Array.isArray(obj[f.key]) ? obj[f.key] : (obj[f.key] = []);
+    const itemFields = f.item || [];
+    const cols = itemFields.filter(x => !x.advanced && x.type !== 'text' && x.type !== 'list');
+    const extra = itemFields.filter(x => !cols.includes(x));
     const itemTitle = f.itemTitle || 'Элемент';
-    const box = el('div', { class: 'form-group param-list' },
-        el('div', { class: 'param-list-title' }, `${f.title} (${items.length})`),
-        f.help ? el('p', { class: 'field-help' }, f.help) : null);
+    const colCount = cols.length + 2;
 
+    const head = el('tr', {},
+        el('th', { class: 'col-num' }, '#'),
+        ...cols.map(c => el('th', { class: `col-${c.type}`, title: c.help || '' }, c.column || c.title)),
+        el('th', { class: 'col-actions' }));
+
+    const body = el('tbody');
     items.forEach((item, i) => {
-        const summaryText = el('span', { class: 'list-item-summary' });
-        const updateSummary = () => { summaryText.textContent = listItemSummary(f, item); };
-        updateSummary();
+        const itemPath = `${path}${f.key}[${i}].`;
+        const move = (j) => () => { [items[i], items[j]] = [items[j], items[i]]; renderParamsForm(); };
+        const open = paramForm.expanded.has(item);
+        const extraVisible = extra.filter(x => isVisible(x, item));
 
-        const stop = (fn) => (e) => { e.preventDefault(); e.stopPropagation(); fn(); renderParamsForm(); };
-        const swap = (j) => () => { [items[i], items[j]] = [items[j], items[i]]; };
+        const actions = el('td', { class: 'col-actions' });
+        if (extraVisible.length) {
+            actions.append(el('button', {
+                type: 'button', class: 'table-btn' + (open ? ' active' : ''),
+                title: extraVisible.map(x => x.title).join(', '),
+                onclick: () => { open ? paramForm.expanded.delete(item) : paramForm.expanded.add(item); renderParamsForm(); }
+            }, `${t('Ещё')} ${open ? '▴' : '▾'}`));
+        }
+        actions.append(
+            el('button', { type: 'button', class: 'table-btn', title: t('Выше'), disabled: i === 0, onclick: move(i - 1) }, '↑'),
+            el('button', { type: 'button', class: 'table-btn', title: t('Ниже'), disabled: i === items.length - 1, onclick: move(i + 1) }, '↓'),
+            el('button', { type: 'button', class: 'table-btn danger', title: t('Удалить'), onclick: () => { items.splice(i, 1); renderParamsForm(); } }, '✕'));
 
-        const details = el('details', {
-            class: 'list-item',
-            open: !paramForm.collapsed.has(item),
-            ontoggle: (e) => { e.target.open ? paramForm.collapsed.delete(item) : paramForm.collapsed.add(item); }
-        },
-            el('summary', {},
-                el('span', { class: 'list-item-num' }, `${itemTitle} ${i + 1}`),
-                summaryText,
-                el('span', { class: 'list-item-actions' },
-                    el('button', { type: 'button', class: 'icon-btn', title: 'Выше', disabled: i === 0, onclick: stop(swap(i - 1)) }, '↑'),
-                    el('button', { type: 'button', class: 'icon-btn', title: 'Ниже', disabled: i === items.length - 1, onclick: stop(swap(i + 1)) }, '↓'),
-                    el('button', { type: 'button', class: 'icon-btn danger', title: 'Удалить', onclick: stop(() => items.splice(i, 1)) }, '✕'))),
-            el('div', { class: 'list-item-body', oninput: updateSummary, onchange: updateSummary },
-                ...renderFieldGroup(f.item || [], item, `${path}${f.key}[${i}].`, 'Ещё')));
-        box.append(details);
+        body.append(el('tr', { class: open ? 'is-open' : '' },
+            el('td', { class: 'col-num' }, String(i + 1)),
+            ...cols.map(c => {
+                if (!isVisible(c, item)) return el('td', { class: `col-${c.type}` });
+                const input = fieldInput(c, item, fieldId(itemPath, c));
+                input.setAttribute('aria-label', `${itemTitle} ${i + 1}: ${c.title}`);
+                return el('td', { class: `col-${c.type}` }, input);
+            }),
+            actions));
+
+        if (open && extraVisible.length) {
+            body.append(el('tr', { class: 'row-extra' },
+                el('td', { colSpan: colCount },
+                    el('div', { class: 'form-grid' }, ...extraVisible.map(x => renderField(x, item, itemPath))))));
+        }
     });
+    if (!items.length) {
+        body.append(el('tr', {}, el('td', { class: 'table-empty', colSpan: colCount }, t('Пока пусто.'))));
+    }
 
-    box.append(el('button', {
-        type: 'button', class: 'btn btn-secondary btn-small',
-        onclick: () => { items.push(fillDefaults(f.item, {})); renderParamsForm(); }
-    }, `+ ${t('Добавить')}: ${itemTitle.toLowerCase()}`));
-    return box;
+    const colHelp = cols.filter(c => c.help);
+    return el('div', { class: 'form-group span-all param-list' },
+        el('div', { class: 'param-list-head' },
+            el('span', { class: 'param-list-title' }, `${f.title} (${items.length})`),
+            el('button', {
+                type: 'button', class: 'btn btn-secondary btn-small',
+                onclick: () => { items.push(fillDefaults(f.item, {})); renderParamsForm(); }
+            }, `+ ${t('Добавить')}`)),
+        f.help ? el('p', { class: 'field-help' }, f.help) : null,
+        el('div', { class: 'table-scroll' }, el('table', { class: 'param-table' }, el('thead', {}, head), body)),
+        colHelp.length ? el('dl', { class: 'col-help' },
+            ...colHelp.flatMap(c => [el('dt', {}, c.column || c.title), el('dd', {}, c.help)])) : null);
 }
 
 function showTrapFormError(message) {
@@ -1700,6 +1739,13 @@ function resetParamsView() {
     setParamsMode(false);
 }
 
+// Описание класса под селектами: уровень уже виден в названии варианта.
+function setClassHelp(classId) {
+    const help = document.getElementById('trap-class-help');
+    const c = state.classes.find(cls => cls.id === classId);
+    if (help) help.textContent = c ? c.description : '';
+}
+
 // Заполняет селект классов. Класс нельзя менять у существующей ловушки.
 function populateClassSelect(selectedClass) {
     const sel = document.getElementById('trap-class');
@@ -1707,8 +1753,6 @@ function populateClassSelect(selectedClass) {
     sel.innerHTML = state.classes.map(c =>
         `<option value="${c.id}">[${escapeHtml(c.level || 'Low')}] ${escapeHtml(c.title)}</option>`).join('');
     if (selectedClass) sel.value = selectedClass;
-    const badgeEl = document.getElementById('trap-class-badge');
-    if (badgeEl) badgeEl.innerHTML = getLevelBadge(sel.value);
 }
 
 // Шаблоны, подходящие выбранному классу.
@@ -1739,8 +1783,6 @@ function populatePresetSelect(classId) {
     }
     sel.innerHTML = html;
     sel.value = '';
-    const badgeEl = document.getElementById('trap-preset-badge');
-    if (badgeEl) badgeEl.innerHTML = '';
 }
 
 // Класс многопортовый? (port_listener). Переключает поля порт/порты.
@@ -1758,13 +1800,7 @@ function togglePortFields(classId) {
 function applyClassDefaults(classId) {
     paramForm.classId = classId;
     const c = currentClass();
-    const badgeEl = document.getElementById('trap-class-badge');
-    if (badgeEl) badgeEl.innerHTML = getLevelBadge(classId);
-    const help = document.getElementById('trap-class-help');
-    if (help) {
-        help.innerHTML = `${getLevelBadge(classId)} <span style="margin-left: 6px;">${escapeHtml(c ? c.description : '')}</span>`;
-    }
-
+    setClassHelp(classId);
     togglePortFields(classId);
     if (c && c.defaultPort) document.getElementById('trap-port').value = c.defaultPort;
     if (c && c.defaultPorts) document.getElementById('trap-ports').value = c.defaultPorts;
@@ -1777,24 +1813,13 @@ function applyClassDefaults(classId) {
 
 function applyPreset(presetId) {
     const p = state.presets.find(p => p.presetId === presetId);
-    const badgeEl = document.getElementById('trap-preset-badge');
-    if (!p) {
-        if (badgeEl) badgeEl.innerHTML = '';
-        return;
-    }
-    if (badgeEl) badgeEl.innerHTML = getLevelBadge(p.class);
+    if (!p) return;
     if (p.class && p.class !== paramForm.classId) {
         const classSel = document.getElementById('trap-class');
         if (classSel && !classSel.disabled) {
             classSel.value = p.class;
             paramForm.classId = p.class;
-            const c = currentClass();
-            const classBadgeEl = document.getElementById('trap-class-badge');
-            if (classBadgeEl) classBadgeEl.innerHTML = getLevelBadge(p.class);
-            const help = document.getElementById('trap-class-help');
-            if (help) {
-                help.innerHTML = `${getLevelBadge(p.class)} <span style="margin-left: 6px;">${escapeHtml(c ? c.description : '')}</span>`;
-            }
+            setClassHelp(p.class);
             togglePortFields(p.class);
             populatePresetSelect(p.class);
             document.getElementById('trap-preset').value = presetId;
@@ -1844,12 +1869,7 @@ function openTrapModal(mode, trapId = null) {
 
         paramForm.classId = trap.class;
         const c = currentClass();
-        const badgeEl = document.getElementById('trap-class-badge');
-        if (badgeEl) badgeEl.innerHTML = getLevelBadge(trap.class);
-        const help = document.getElementById('trap-class-help');
-        if (help) {
-            help.innerHTML = `${getLevelBadge(trap.class)} <span style="margin-left: 6px;">${escapeHtml(c ? c.description : '')}</span>`;
-        }
+        setClassHelp(trap.class);
         togglePortFields(trap.class);
 
         populateHostSelect(trap.hostId);

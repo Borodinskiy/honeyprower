@@ -16,6 +16,7 @@ type Field struct {
 	Regex       bool     `json:"regex,omitempty"` // значение — регулярное выражение
 	Hex         bool     `json:"hex,omitempty"`   // значение — байты в hex
 	ShowIf      *Cond    `json:"showIf,omitempty"`
+	Column      string   `json:"column,omitempty"` // короткий заголовок колонки, когда поле — колонка таблицы списка
 
 	// Для list: поля одного элемента, как назвать элемент и какие поля
 	// показывать в свёрнутом заголовке элемента.
@@ -68,11 +69,12 @@ func list(key, title, itemTitle, help string, summary []string, item ...Field) F
 	return Field{Key: key, Title: title, Type: "list", Help: help, ItemTitle: itemTitle, Summary: summary, Item: item}
 }
 
-func (f Field) adv() Field        { f.Advanced = true; return f }
-func (f Field) def(v any) Field   { f.Default = v; return f }
-func (f Field) re() Field         { f.Regex = true; return f }
-func (f Field) hex() Field        { f.Hex = true; return f }
-func (f Field) ph(p string) Field { f.Placeholder = p; return f }
+func (f Field) adv() Field         { f.Advanced = true; return f }
+func (f Field) def(v any) Field    { f.Default = v; return f }
+func (f Field) re() Field          { f.Regex = true; return f }
+func (f Field) hex() Field         { f.Hex = true; return f }
+func (f Field) ph(p string) Field  { f.Placeholder = p; return f }
+func (f Field) col(c string) Field { f.Column = c; return f }
 func (f Field) when(key string, in ...string) Field {
 	f.ShowIf = &Cond{Key: key, In: in}
 	return f
@@ -122,12 +124,12 @@ var schemas = map[string][]Field{
 		list("rules", "Правила ответа", "Правило",
 			"Каждая строка клиента проверяется по правилам сверху вниз; срабатывает первое совпавшее.",
 			[]string{"match", "response"},
-			str("match", "Если клиент прислал (regex)", "", `Регистр не важен. ^USER\s+(.*)$ — команда USER, (.*) — её аргумент.`).re().ph(`^USER\s+(.*)$`),
-			str("response", "Ответить", "", `{1} — первая скобка из regex, {username}, {hostname}. `+escHelp).ph(`331 Password required\r\n`),
+			str("match", "Если клиент прислал (regex)", "", `Регистр не важен. ^USER\s+(.*)$ — команда USER, (.*) — её аргумент.`).re().ph(`^USER\s+(.*)$`).col("Если пришло (regex)"),
+			str("response", "Ответить", "", `{1} — первая скобка из regex, {username}, {hostname}. `+escHelp).ph(`331 Password required\r\n`).col("Ответ"),
 			enum("capture", "Записать как", "", "Скобки можно назвать: (?P<user>...) и (?P<pass>...).",
 				opt("", "ничего особого"), opt("username", "логин (1-я скобка)"), opt("password", "пароль (1-я скобка)"),
-				opt("username_password", "логин и пароль (1-я и 2-я скобки)"), opt("command", "команду")),
-			boolean("close", "Закрыть соединение после ответа", false, ""),
+				opt("username_password", "логин и пароль (1-я и 2-я скобки)"), opt("command", "команду")).col("Записать как"),
+			boolean("close", "Закрыть соединение после ответа", false, "").col("Закрыть"),
 			enum("decode", "Декодировать захват", "", "",
 				opt("", "нет"), opt("base64", "base64"), opt("sasl_plain", "SASL PLAIN")).adv().when("capture", "username", "password", "username_password"),
 			str("state", "Только в состоянии", "*", "* — в любом. Состояния задают порядок шагов: например, пароль принимается только после логина.").adv(),
@@ -145,14 +147,14 @@ var schemas = map[string][]Field{
 		list("routes", "Страницы (маршруты)", "Маршрут",
 			"Путь запроса проверяется сверху вниз; срабатывает первый совпавший маршрут.",
 			[]string{"method", "path", "status"},
-			str("path", "Путь (regex)", "^/$", "^/$ — главная, ^/admin — всё под /admin. Query-строка не учитывается.").re(),
+			str("path", "Путь (regex)", "^/$", "^/$ — главная, ^/admin — всё под /admin. Query-строка не учитывается.").re().col("Путь (regex)"),
 			enum("method", "Метод", "*", "",
 				opt("*", "любой"), opt("GET", "GET"), opt("POST", "POST"), opt("PUT", "PUT"),
 				opt("DELETE", "DELETE"), opt("HEAD", "HEAD"), opt("OPTIONS", "OPTIONS")),
-			integer("status", "Статус", 200, "", 100, 599),
+			integer("status", "Статус", 200, "", 100, 599).col("Код"),
 			text("body", "Тело ответа", "<html><body>It works!</body></html>", "Подстановки: {path}, {src_ip}, {username}."),
-			boolean("capture_login", "Ловить логин/пароль из формы или JSON", false, ""),
-			str("tag", "Метка в журнале", "", "Например wp-login — по ней удобно фильтровать события."),
+			boolean("capture_login", "Ловить логин/пароль из формы или JSON", false, "").col("Ловить вход"),
+			str("tag", "Метка в журнале", "", "Например wp-login — по ней удобно фильтровать события.").col("Метка"),
 			str("content_type", "Content-Type", "text/html; charset=UTF-8", "").adv(),
 			text("headers", "Доп. заголовки (K: V, по строке)", "", "Например Location: /login для редиректа (статус 302).").adv(),
 		),
@@ -187,7 +189,7 @@ var schemas = map[string][]Field{
 		list("tokens", "Ссылки-приманки", "Ссылка",
 			"Любой запрос, в котором встретится ID токена, даёт событие «Honeytoken». Положите ссылку туда, куда легитимный пользователь не заглядывает.",
 			[]string{"label", "token"},
-			str("label", "Где лежит (метка)", "", "Например share/finance/README.html — чтобы понять, какая приманка сработала.").ph("share/finance/README.html"),
+			str("label", "Где лежит (метка)", "", "Например share/finance/README.html — чтобы понять, какая приманка сработала.").ph("share/finance/README.html").col("Где лежит"),
 			str("token", "ID токена", "", "Пусто — сгенерируется при сохранении."),
 		),
 		text("response_body", "Что отдать по ссылке", "<html><body></body></html>", "Пустая страница не вызывает подозрений.").adv(),
@@ -203,9 +205,9 @@ var schemas = map[string][]Field{
 		list("rules", "Правила ответа", "Правило",
 			"Срабатывают, если протокол не ответил сам. Запрос проверяется сверху вниз по hex-префиксу или regex.",
 			[]string{"match_regex", "match_hex"},
-			str("match_regex", "Regex по тексту запроса", "", "").re(),
-			str("match_hex", "Hex-префикс запроса", "", "").hex(),
-			str("response", "Ответ (текст)", "", escHelp),
+			str("match_regex", "Regex по тексту запроса", "", "").re().col("Regex"),
+			str("match_hex", "Hex-префикс запроса", "", "").hex().col("Hex-префикс"),
+			str("response", "Ответ (текст)", "", escHelp).col("Ответ"),
 			str("response_hex", "Ответ (hex, заменяет текст)", "", "").hex().adv(),
 		),
 		boolean("limit_amplification", "Не отвечать больше запроса", true, "Не даёт использовать ловушку для DDoS-усиления (кроме DNS/NTP).").adv(),
