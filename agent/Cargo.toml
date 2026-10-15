@@ -9,7 +9,7 @@ name = "honeyforge-agent"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.47.1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 ureq = { version = "2.12.1", features = ["tls"] }
@@ -24,6 +24,7 @@ flate2 = "1.0"
 rand = "0.8"
 socket2 = "0.5"
 hex = "0.4"
+libc = "0.2"
 russh = { version = "0.64.1", default-features = false, features = ["ring", "flate2"] }
 
 [profile.release]

@@ -18,6 +18,8 @@ pub mod util;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod plugin_tests;
 
 use config::Config;
 use std::path::PathBuf;
@@ -87,7 +89,16 @@ async fn main() -> ExitCode {
         );
     }
 
-    let handles = runtime::serve(&units, bound, &sinks);
+    let (bound, mut handles) = match runtime::start_plugins(&units, bound, &sinks).await {
+        Ok(x) => x,
+        Err(errors) => {
+            for e in errors {
+                eprintln!("{e}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    handles.extend(runtime::serve(&units, bound, &sinks));
 
     tokio::select! {
         _ = shutdown_signal() => {
@@ -144,7 +155,13 @@ async fn select_all(
 
 fn load_config(path: &str) -> Result<Config, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    let mut cfg: Config = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    cfg.base_dir = std::path::Path::new(path)
+        .parent()
+        .map(|p| if p.as_os_str().is_empty() { std::path::Path::new(".") } else { p })
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    Ok(cfg)
 }
 
 pub fn resolve_buffer_path() -> PathBuf {

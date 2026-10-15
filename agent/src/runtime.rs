@@ -89,6 +89,48 @@ pub async fn bind_all(units: &[Unit]) -> Result<Vec<Bound>, Vec<String>> {
     }
 }
 
+/// Запускает плагины режима service. Их порты проверены bind_all и здесь
+/// освобождаются — программа займёт их сама. Если какая-то программа не
+/// пережила первые секунды, останавливает остальные и возвращает причины.
+/// Возвращает порты остальных ловушек и задачи-надзиратели плагинов.
+pub async fn start_plugins(
+    units: &[Unit],
+    bound: Vec<Bound>,
+    sinks: &[EventSink],
+) -> Result<(Vec<Bound>, Vec<JoinHandle<()>>), Vec<String>> {
+    let (service, rest): (Vec<Bound>, Vec<Bound>) =
+        bound.into_iter().partition(|b| units[b.unit].trap.is_service_plugin());
+    drop(service);
+
+    let mut handles = Vec::new();
+    let mut waits = Vec::new();
+    for (i, u) in units.iter().enumerate() {
+        if let Trap::Plugin(p) = &*u.trap {
+            if p.is_service() {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                handles.push(tokio::spawn(p.clone().run_service(sinks[i].clone(), tx)));
+                waits.push((u.label.clone(), rx));
+            }
+        }
+    }
+    let mut errors = Vec::new();
+    for (label, rx) in waits {
+        match rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errors.push(format!("ловушка {label}: {e}")),
+            Err(_) => errors.push(format!("ловушка {label}: плагин не запустился")),
+        }
+    }
+    if errors.is_empty() {
+        Ok((rest, handles))
+    } else {
+        for h in handles {
+            h.abort();
+        }
+        Err(errors)
+    }
+}
+
 /// Запускает приём соединений на занятых портах. sinks[i] — канал событий units[i].
 pub fn serve(units: &[Unit], bound: Vec<Bound>, sinks: &[EventSink]) -> Vec<JoinHandle<()>> {
     // Лимит клиентов — на ловушку, а не на порт: многопортовая ловушка делит его.

@@ -9,6 +9,7 @@ pub mod http;
 pub mod iec104;
 pub mod low_extra;
 pub mod medium_extra;
+pub mod plugin;
 pub mod port_listener;
 pub mod scada;
 pub mod ssh;
@@ -35,6 +36,7 @@ pub enum Trap {
     LowExtra(Arc<low_extra::LowExtraTrap>),
     MediumExtra(Arc<medium_extra::MediumExtraTrap>),
     Ssh(Arc<ssh::SshTrap>),
+    Plugin(Arc<plugin::PluginTrap>),
 }
 
 impl Trap {
@@ -54,6 +56,7 @@ impl Trap {
             "low_extra" => Trap::LowExtra(Arc::new(low_extra::LowExtraTrap::new(p)?)),
             "medium_extra" => Trap::MediumExtra(Arc::new(medium_extra::MediumExtraTrap::new(p)?)),
             "ssh" => Trap::Ssh(Arc::new(ssh::SshTrap::new(p, &cfg.key_seed)?)),
+            "plugin" => Trap::Plugin(Arc::new(plugin::PluginTrap::new(cfg)?)),
             other => return Err(format!("неизвестный класс ловушки: {other}")),
         })
     }
@@ -61,12 +64,18 @@ impl Trap {
     pub fn transport(&self) -> &'static str {
         match self {
             Trap::Udp(_) => "udp",
+            Trap::Plugin(p) => p.transport(),
             _ => "tcp",
         }
     }
 
     pub fn multi_port(&self) -> bool {
         matches!(self, Trap::PortListener(_))
+    }
+
+    /// Плагин, который сам слушает порт: агент лишь проверяет, что порт свободен.
+    pub fn is_service_plugin(&self) -> bool {
+        matches!(self, Trap::Plugin(p) if p.is_service())
     }
 
     /// Порты, которые должна открыть ловушка.
@@ -113,6 +122,11 @@ impl Trap {
             Trap::HighInteraction(t) => t.handle(s).await,
             Trap::LowExtra(t) => t.handle(s).await,
             Trap::MediumExtra(t) => t.handle(s).await,
+            Trap::Plugin(t) => {
+                if !t.is_service() {
+                    t.handle(s).await
+                }
+            }
         }
     }
 }

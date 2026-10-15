@@ -48,6 +48,9 @@ pub struct Config {
     /// Джиттер в секундах для рандомизации периодических задач.
     #[serde(default = "default_jitter")]
     pub jitter_s: u64,
+    /// Каталог файла конфига: относительные пути плагинов считаются от него. Ставит main.
+    #[serde(skip)]
+    pub base_dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +77,35 @@ pub struct TrapConfig {
     /// В конфиге его нет: Config::units подставляет токен ловушки.
     #[serde(skip)]
     pub key_seed: String,
+    /// Для класса "plugin": чужая программа, которую агент запускает и слушает.
+    #[serde(default)]
+    pub plugin: Option<PluginSpec>,
+}
+
+/// Плагин — проект пользователя, загруженный в центр. Центр кладёт его файлы
+/// в `dir` и описывает, как его запустить.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginSpec {
+    /// Имя плагина (как в центре): для журнала и trap_class событий.
+    pub slug: String,
+    /// Каталог с файлами плагина. Относительный — от каталога конфига.
+    pub dir: String,
+    /// Команда запуска: argv. Первый элемент с "/" — путь внутри dir, иначе ищется в PATH.
+    pub command: Vec<String>,
+    /// "service" — программа сама слушает порт; "stdio" — агент слушает порт
+    /// и на каждое соединение запускает программу с stdin/stdout = соединение.
+    #[serde(default = "default_plugin_mode")]
+    pub mode: String,
+    /// Транспорт порта для режима service: tcp | udp.
+    #[serde(default = "default_plugin_transport")]
+    pub transport: String,
+}
+
+fn default_plugin_mode() -> String {
+    "service".to_string()
+}
+fn default_plugin_transport() -> String {
+    "tcp".to_string()
 }
 
 impl TrapConfig {
@@ -198,6 +230,12 @@ impl Config {
             }
             // Ключ хоста SSH должен переживать перезапуск: выводим его из токена ловушки.
             trap.key_seed = trap.token.clone();
+            if let Some(p) = trap.plugin.as_mut() {
+                let dir = std::path::Path::new(&p.dir);
+                if dir.is_relative() {
+                    p.dir = self.base_dir.join(dir).to_string_lossy().into_owned();
+                }
+            }
 
             let mut sender = self.clone();
             sender.token = trap.token.clone();
