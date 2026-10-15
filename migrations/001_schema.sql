@@ -77,3 +77,14 @@ CREATE INDEX IF NOT EXISTS events_trap_id_idx ON events (trap_id);
 CREATE INDEX IF NOT EXISTS events_ts_idx ON events (ts DESC);
 CREATE INDEX IF NOT EXISTS events_type_idx ON events (event_type);
 CREATE INDEX IF NOT EXISTS events_src_ip_idx ON events (src_ip);
+
+-- Свои ловушки (internal/plugin): проект пользователя с манифестом. archive —
+-- проверенный и пересобранный tar.gz, который центр по SSH кладёт на хосты.
+CREATE TABLE IF NOT EXISTS plugins (
+    name VARCHAR(64) PRIMARY KEY,
+    manifest JSONB NOT NULL,
+    sha256 VARCHAR(64) NOT NULL,
+    size BIGINT NOT NULL,
+    archive BYTEA NOT NULL,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

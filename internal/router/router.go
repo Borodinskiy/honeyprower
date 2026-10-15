@@ -56,6 +56,13 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	mux.Handle("POST /api/traps/{id}/deploy", requireAuth(http.HandlerFunc(handlers.HandleDeployTrap)))
 	mux.Handle("POST /api/traps/{id}/undeploy", requireAuth(http.HandlerFunc(handlers.HandleUndeployTrap)))
 
+	mux.Handle("GET /api/plugins", requireAuth(http.HandlerFunc(handlers.ListPlugins)))
+	mux.Handle("POST /api/plugins", requireAuth(http.HandlerFunc(handlers.UploadPlugin)))
+	mux.Handle("GET /api/plugins/{name}", requireAuth(http.HandlerFunc(handlers.GetPlugin)))
+	mux.Handle("DELETE /api/plugins/{name}", requireAuth(http.HandlerFunc(handlers.DeletePlugin)))
+	mux.Handle("GET /api/plugins/{name}/archive", requireAuth(http.HandlerFunc(handlers.PluginArchive)))
+	mux.Handle("GET /api/plugin-templates/{kind}", requireAuth(http.HandlerFunc(handlers.PluginTemplate)))
+
 	mux.Handle("GET /api/events", requireAuth(http.HandlerFunc(handlers.ListFilterEvents)))
 	mux.Handle("GET /api/stats", requireAuth(http.HandlerFunc(handlers.GetStats)))
 	mux.Handle("GET /api/stats/dashboard", requireAuth(http.HandlerFunc(handlers.GetDashboard)))

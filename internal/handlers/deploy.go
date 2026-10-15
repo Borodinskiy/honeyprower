@@ -129,8 +129,13 @@ func (h *Handlers) HandleDeployTrap(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusConflict, "trap belongs to a host; deploy the host instead")
 			return
 		}
-		cfg := h.buildConfig(r, trap)
-		payload, status, msg := h.agentPayload(&cfg, target)
+		cs, err := h.loadClasses(r.Context())
+		if err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap classes")
+			return
+		}
+		cfg := h.buildConfig(r, trap, cs, true)
+		payload, status, msg := h.agentPayload(r.Context(), &cfg, target)
 		if msg != "" {
 			httpx.WriteError(w, status, msg)
 			return
@@ -198,7 +203,7 @@ func (h *Handlers) HandleUndeployTrap(w http.ResponseWriter, r *http.Request) {
 // agentPayload готовит файлы для установки агента с конфигом cfg на target.
 // Если центр открыт по localhost, адрес в cfg заменяется на видимый из сети цели.
 // При ошибке возвращает HTTP-статус и сообщение.
-func (h *Handlers) agentPayload(cfg *agentConfig, target deploy.TargetConfig) (deploy.Payload, int, string) {
+func (h *Handlers) agentPayload(ctx context.Context, cfg *agentConfig, target deploy.TargetConfig) (deploy.Payload, int, string) {
 	// Агент на другой машине не достучится до центра по localhost: подставляем адрес центра,
 	// видимый из сети цели. Если цель — сама машина центра, localhost подходит как есть.
 	if isLoopbackHost(hostOf(cfg.CenterURL)) && !isLocalHost(target.Host) {
@@ -236,7 +241,17 @@ func (h *Handlers) agentPayload(cfg *agentConfig, target deploy.TargetConfig) (d
 		return deploy.Payload{}, http.StatusInternalServerError, "agent binary not found; please build the agent first"
 	}
 
-	return deploy.Payload{BinaryPath: binPath, ServiceContent: svcBytes, ConfigJSON: cfgBytes}, 0, ""
+	payload := deploy.Payload{BinaryPath: binPath, ServiceContent: svcBytes, ConfigJSON: cfgBytes}
+	for _, p := range cfg.plugins {
+		archive, err := h.Store.GetPluginArchive(ctx, p.rec.Name)
+		if err != nil {
+			return deploy.Payload{}, http.StatusInternalServerError, "failed to load plugin " + p.rec.Name
+		}
+		payload.Plugins = append(payload.Plugins, deploy.PluginFiles{
+			Name: p.rec.Name, Dir: pluginDir(p, true), Archive: archive, Requires: p.manifest.Requires,
+		})
+	}
+	return payload, 0, ""
 }
 
 // decodeTarget reads and checks SSH connection settings; on failure the error is already written.

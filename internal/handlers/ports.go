@@ -40,19 +40,19 @@ func parsePortSpec(spec string) []int {
 	return out
 }
 
-// trapProto — транспорт класса ловушки (tcp, если класс неизвестен).
-func trapProto(class string) string {
-	if c, ok := catalog.ClassByID(class); ok && c.Transport != "" {
-		return c.Transport
+// trapSockets — порты, которые ловушка займёт на хосте, вида "2222/tcp"
+// (tcp, если класс неизвестен).
+func trapSockets(t *models.Trap, cs *classSet) []string {
+	var c catalog.Class
+	if cs != nil {
+		c, _ = cs.class(t.Class)
 	}
-	return "tcp"
-}
-
-// trapSockets — порты, которые ловушка займёт на хосте, вида "2222/tcp".
-func trapSockets(t *models.Trap) []string {
-	proto := trapProto(t.Class)
+	proto := c.Transport
+	if proto == "" {
+		proto = "tcp"
+	}
 	var ports []int
-	if c, ok := catalog.ClassByID(t.Class); ok && c.MultiPort {
+	if c.MultiPort {
 		ports = parsePortSpec(t.Ports)
 	} else if t.Port > 0 {
 		ports = []int{t.Port}
@@ -67,12 +67,12 @@ func trapSockets(t *models.Trap) []string {
 // portClash ищет включённую ловушку того же хоста, которая уже занимает порт
 // кандидата. Агент открывает порты всех ловушек сразу и при пересечении не
 // запустится, поэтому конфликт ловим при сохранении. Пусто — конфликта нет.
-func portClash(cand *models.Trap, all []models.Trap) (socket string, other *models.Trap) {
+func portClash(cand *models.Trap, all []models.Trap, cs *classSet) (socket string, other *models.Trap) {
 	if cand.HostID == nil || !cand.Enabled {
 		return "", nil
 	}
 	mine := map[string]bool{}
-	for _, s := range trapSockets(cand) {
+	for _, s := range trapSockets(cand, cs) {
 		mine[s] = true
 	}
 	for i := range all {
@@ -80,7 +80,7 @@ func portClash(cand *models.Trap, all []models.Trap) (socket string, other *mode
 		if o.ID == cand.ID || !o.Enabled || o.HostID == nil || *o.HostID != *cand.HostID {
 			continue
 		}
-		for _, s := range trapSockets(o) {
+		for _, s := range trapSockets(o, cs) {
 			if mine[s] {
 				return s, o
 			}

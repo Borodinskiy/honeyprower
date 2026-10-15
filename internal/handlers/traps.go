@@ -41,12 +41,17 @@ func (h *Handlers) CreateTrap(w http.ResponseWriter, r *http.Request) {
 	if in.Bind == "" {
 		in.Bind = "0.0.0.0"
 	}
-	if msg := validateTrap(&in); msg != "" {
+	cs, err := h.loadClasses(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap classes")
+		return
+	}
+	if msg := validateTrap(&in, cs); msg != "" {
 		httpx.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
 	cand := models.Trap{HostID: in.HostID, Class: in.Class, Port: in.Port, Ports: in.Ports, Enabled: in.Enabled}
-	if !h.checkTrapPlacement(w, r, &cand) {
+	if !h.checkTrapPlacement(w, r, &cand, cs) {
 		return
 	}
 
@@ -130,12 +135,22 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap")
 		return
 	}
+	cs, err := h.loadClasses(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap classes")
+		return
+	}
 	if patch.Params != nil {
+		class, ok := cs.class(cur.Class)
+		if !ok {
+			httpx.WriteError(w, http.StatusBadRequest, "unknown trap class")
+			return
+		}
 		ports := ""
 		if patch.Ports != nil {
 			ports = *patch.Ports
 		}
-		params, msg := prepareParams(cur.Class, *patch.Params, &ports)
+		params, msg := prepareParams(class, *patch.Params, &ports)
 		if msg != "" {
 			httpx.WriteError(w, http.StatusBadRequest, msg)
 			return
@@ -159,7 +174,7 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 	if patch.Enabled != nil {
 		next.Enabled = *patch.Enabled
 	}
-	if !h.checkTrapPlacement(w, r, &next) {
+	if !h.checkTrapPlacement(w, r, &next, cs) {
 		return
 	}
 
@@ -196,9 +211,15 @@ func (h *Handlers) DeleteTrap(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// Classes serves the trap-class catalog that drives the create form.
+// Classes serves the trap-class catalog that drives the create form:
+// built-in classes and uploaded plugins.
 func (h *Handlers) Classes(w http.ResponseWriter, r *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, catalog.Classes())
+	cs, err := h.loadClasses(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap classes")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, cs.list())
 }
 
 // Presets serves ready-made trap configurations.
@@ -208,7 +229,7 @@ func (h *Handlers) Presets(w http.ResponseWriter, r *http.Request) {
 
 // checkTrapPlacement проверяет, что хост ловушки существует и её порты на нём
 // свободны. При ошибке сам отвечает клиенту и возвращает false.
-func (h *Handlers) checkTrapPlacement(w http.ResponseWriter, r *http.Request, cand *models.Trap) bool {
+func (h *Handlers) checkTrapPlacement(w http.ResponseWriter, r *http.Request, cand *models.Trap, cs *classSet) bool {
 	if cand.HostID == nil {
 		return true
 	}
@@ -224,7 +245,7 @@ func (h *Handlers) checkTrapPlacement(w http.ResponseWriter, r *http.Request, ca
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to load traps")
 		return false
 	}
-	if socket, other := portClash(cand, all); other != nil {
+	if socket, other := portClash(cand, all, cs); other != nil {
 		httpx.WriteJSON(w, http.StatusConflict, map[string]any{
 			"error":  "port conflict",
 			"port":   socket,
@@ -236,18 +257,18 @@ func (h *Handlers) checkTrapPlacement(w http.ResponseWriter, r *http.Request, ca
 	return true
 }
 
-func validateTrap(in *models.TrapCreate) string {
+func validateTrap(in *models.TrapCreate, cs *classSet) string {
 	if in.Name == "" {
 		return "name is required"
 	}
 	if utf8.RuneCountInString(in.Name) > maxTrapNameLen {
 		return "name is too long"
 	}
-	class, ok := catalog.ClassByID(in.Class)
+	class, ok := cs.class(in.Class)
 	if !ok {
 		return "unknown trap class"
 	}
-	params, msg := prepareParams(class.ID, in.Params, &in.Ports)
+	params, msg := prepareParams(class, in.Params, &in.Ports)
 	if msg != "" {
 		return msg
 	}
@@ -266,7 +287,7 @@ func validateTrap(in *models.TrapCreate) string {
 // center generates itself (honeytoken IDs). For multi-port classes a
 // params.ports value moves into the trap's own ports field when that is empty.
 // Returns normalized params or an error message.
-func prepareParams(classID string, params json.RawMessage, ports *string) (json.RawMessage, string) {
+func prepareParams(class catalog.Class, params json.RawMessage, ports *string) (json.RawMessage, string) {
 	if len(params) == 0 {
 		params = json.RawMessage("{}")
 	}
@@ -277,7 +298,7 @@ func prepareParams(classID string, params json.RawMessage, ports *string) (json.
 	if json.Unmarshal(params, &obj) != nil || obj == nil {
 		return nil, "params must be a JSON object"
 	}
-	if class, _ := catalog.ClassByID(classID); class.MultiPort {
+	if class.MultiPort {
 		if p, ok := obj["ports"].(string); ok {
 			if strings.TrimSpace(*ports) == "" {
 				*ports = p
@@ -285,10 +306,10 @@ func prepareParams(classID string, params json.RawMessage, ports *string) (json.
 			delete(obj, "ports")
 		}
 	}
-	if err := catalog.ValidateParams(classID, obj); err != nil {
+	if err := catalog.ValidateFields(class.Fields, obj); err != nil {
 		return nil, "invalid params: " + err.Error()
 	}
-	if classID == "honeytoken" {
+	if class.ID == "honeytoken" {
 		if err := fillHoneytokens(obj); err != nil {
 			return nil, "failed to generate token"
 		}

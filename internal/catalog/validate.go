@@ -16,6 +16,11 @@ func ValidateParams(classID string, params map[string]any) error {
 	return validateFields(Schema(classID), params, "")
 }
 
+// ValidateFields — то же по произвольной схеме (у своих ловушек она из манифеста).
+func ValidateFields(fields []Field, params map[string]any) error {
+	return validateFields(fields, params, "")
+}
+
 func validateFields(fields []Field, obj map[string]any, prefix string) error {
 	for _, f := range fields {
 		v, ok := obj[f.Key]

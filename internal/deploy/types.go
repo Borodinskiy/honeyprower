@@ -64,6 +64,17 @@ type Payload struct {
 	BinaryPath     string `json:"binaryPath,omitempty"`
 	ServiceContent []byte `json:"serviceContent,omitempty"`
 	ConfigJSON     []byte `json:"configJson,omitempty"`
+	// Plugins — свои ловушки, которые запускает агент из этого конфига.
+	Plugins []PluginFiles `json:"-"`
+}
+
+// PluginFiles — проект своей ловушки: архив tar.gz и каталог на хосте, куда его
+// распаковать (имя каталога включает хэш, поэтому одна версия ставится один раз).
+type PluginFiles struct {
+	Name     string
+	Dir      string // абсолютный, например /opt/honeyforge/plugins/my-ftp-0123456789ab
+	Archive  []byte
+	Requires []string // команды, которые должны быть на хосте
 }
 
 // ServiceStatus describes the runtime status of the remote agent service.
@@ -72,8 +83,11 @@ type ServiceStatus struct {
 	SubState  string `json:"subState"`
 	Loaded    bool   `json:"loaded"`
 	Listening []int  `json:"listeningPorts,omitempty"`
-	Uptime    string `json:"uptime,omitempty"`
-	RawOutput string `json:"rawOutput,omitempty"`
+	// ListeningAll — все слушающие TCP-порты хоста: порт своей ловушки в режиме
+	// service держит её программа, а не процесс агента.
+	ListeningAll []int  `json:"listeningAllPorts,omitempty"`
+	Uptime       string `json:"uptime,omitempty"`
+	RawOutput    string `json:"rawOutput,omitempty"`
 }
 
 // Deployer abstracts remote agent installation, lifecycle operations, and removal.

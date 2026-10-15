@@ -26,6 +26,7 @@ type Memory struct {
 	byKeyID  map[string]int64
 	events   map[int64][]models.Event // trapID -> events (oldest first)
 	users    map[int64]*models.User
+	plugins  map[string]*pluginRow
 	byName   map[string]int64 // lower-cased username -> id
 	now      func() time.Time
 }
@@ -39,6 +40,7 @@ func NewInMemory() *Memory {
 		byKeyID: make(map[string]int64),
 		events:  make(map[int64][]models.Event),
 		users:   make(map[int64]*models.User),
+		plugins: make(map[string]*pluginRow),
 		byName:  make(map[string]int64),
 		now:     time.Now,
 	}
@@ -599,4 +601,63 @@ func formatTS(ts float64) string {
 	sec := int64(ts)
 	nsec := int64((ts - float64(sec)) * 1e9)
 	return time.Unix(sec, nsec).UTC().Format("2006-01-02 15:04:05")
+}
+
+// ---------------- plugins ----------------
+
+type pluginRow struct {
+	def     models.Plugin
+	archive []byte
+}
+
+func (m *Memory) ListPlugins(_ context.Context) ([]models.Plugin, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]models.Plugin, 0, len(m.plugins))
+	for _, p := range m.plugins {
+		out = append(out, p.def)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (m *Memory) GetPlugin(_ context.Context, name string) (*models.Plugin, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.plugins[name]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := p.def
+	return &cp, nil
+}
+
+func (m *Memory) GetPluginArchive(_ context.Context, name string) ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.plugins[name]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return append([]byte(nil), p.archive...), nil
+}
+
+func (m *Memory) SavePlugin(_ context.Context, p models.Plugin, archive []byte) (*models.Plugin, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p.UploadedAt = m.now().UTC()
+	p.Size = int64(len(archive))
+	m.plugins[p.Name] = &pluginRow{def: p, archive: append([]byte(nil), archive...)}
+	cp := p
+	return &cp, nil
+}
+
+func (m *Memory) DeletePlugin(_ context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.plugins[name]; !ok {
+		return ErrNotFound
+	}
+	delete(m.plugins, name)
+	return nil
 }

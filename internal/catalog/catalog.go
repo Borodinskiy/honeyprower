@@ -24,6 +24,12 @@ type Class struct {
 	DefaultPorts  string          `json:"defaultPorts,omitempty"` // для многопортовых классов
 	DefaultParams json.RawMessage `json:"defaultParams"`
 	Fields        []Field         `json:"fields"` // описание параметров для формы
+
+	// Только у своих ловушек (internal/plugin): откуда класс и какая версия загружена.
+	Origin  string `json:"origin,omitempty"` // "plugin"
+	Version string `json:"version,omitempty"`
+	Mode    string `json:"mode,omitempty"` // service | stdio
+	SHA256  string `json:"sha256,omitempty"`
 }
 
 // Preset is a ready-made trap configuration (class + params).

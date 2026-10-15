@@ -709,14 +709,14 @@ func TestTrapLevelDeployRefusedForHostedTrap(t *testing.T) {
 func TestTrapsHashIgnoresJSONFormattingAndNames(t *testing.T) {
 	a := []models.Trap{{ID: 1, Name: "A", Token: "t", Class: "ssh", Port: 22, Params: json.RawMessage(`{"b":1,"a":"x"}`)}}
 	b := []models.Trap{{ID: 1, Name: "B", Token: "t", Class: "ssh", Port: 22, Params: json.RawMessage(`{ "a" : "x", "b" : 1 }`)}}
-	if trapsHash(a) != trapsHash(b) {
+	if trapsHash(a, nil) != trapsHash(b, nil) {
 		t.Fatal("hash must not depend on JSON formatting or name")
 	}
 	c := []models.Trap{{ID: 1, Token: "t", Class: "ssh", Port: 22, Params: json.RawMessage(`{"a":"y","b":1}`)}}
-	if trapsHash(a) == trapsHash(c) {
+	if trapsHash(a, nil) == trapsHash(c, nil) {
 		t.Fatal("hash must change with params")
 	}
-	if trapsHash(nil) == trapsHash(a) {
+	if trapsHash(nil, nil) == trapsHash(a, nil) {
 		t.Fatal("empty set must differ")
 	}
 }

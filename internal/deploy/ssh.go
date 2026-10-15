@@ -23,10 +23,22 @@ var _ Deployer = (*SSHDeployer)(nil)
 // update could save an agent that is crash-looping (it is briefly "active" between restarts).
 const goodDir = "/var/lib/honeyforge/last-good"
 
+// pluginsRoot — где на хосте лежат проекты своих ловушек (каталог на версию).
+const pluginsRoot = "/opt/honeyforge/plugins"
+
+// pluginDataDir — сюда программы плагинов могут писать (агент работает как nobody).
+const pluginDataDir = "/var/lib/honeyforge/plugin-data"
+
 // removeCmd tolerates an absent service (already removed), but not a failed rm (no rights).
 const removeCmd = "systemctl disable --now honeyforge-agent.service >/dev/null 2>&1; " +
 	"rm -f /etc/systemd/system/honeyforge-agent.service /usr/local/bin/honeyforge-agent && " +
-	"rm -rf /etc/honeyforge /var/lib/honeyforge && systemctl daemon-reload"
+	"rm -rf /etc/honeyforge /var/lib/honeyforge /opt/honeyforge && systemctl daemon-reload"
+
+// ErrPluginRequirements: на хосте нет программ, без которых плагин не запустится.
+var ErrPluginRequirements = errors.New("plugin requirements not met on host")
+
+// safeArg — имена команд и каталогов, которые подставляются в shell без кавычек.
+var safeArg = regexp.MustCompile(`^[A-Za-z0-9._+/-]+$`)
 
 // saveGoodCmd remembers the agent that has just been verified (replacing the old copy atomically).
 const saveGoodCmd = "rm -rf " + goodDir + ".tmp && mkdir -p " + goodDir + ".tmp && " +
@@ -113,6 +125,11 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 	}
 
 	// 3. Deliver files and move them to destination locations
+	// Step 3.0: projects of custom traps — before the agent, which needs them to start.
+	if err := d.installPlugins(ctx, client, target, payload.Plugins); err != nil {
+		return err
+	}
+
 	// Step 3.1: Agent binary
 	if err := ctx.Err(); err != nil {
 		return err
@@ -170,6 +187,8 @@ func (d *SSHDeployer) Deploy(ctx context.Context, target TargetConfig, payload P
 	}
 	// Best effort: without the copy a later failed update can only stop the service.
 	_ = d.runCommand(client, target, saveGoodCmd)
+	// Old plugin versions go only now: until the new agent started, rollback could need them.
+	_ = d.runCommand(client, target, prunePluginsCmd(payload.Plugins))
 
 	// Post-install health check (if enabled)
 	if d.CheckHealth || target.CheckHealth {
@@ -247,6 +266,7 @@ func (d *SSHDeployer) Status(ctx context.Context, target TargetConfig) (*Service
 		rawBuilder.WriteString(fmt.Sprintf("\nports stderr:\n%s", portsErr))
 	}
 	status.Listening = parseListeningPorts(portsOut)
+	status.ListeningAll = parseAllListeningPorts(portsOut)
 
 	// 3. Query uptime if active
 	if status.Active {
@@ -515,6 +535,27 @@ func isAuthError(err error) bool {
 
 var portRegex = regexp.MustCompile(`(?::|\*)(\d{1,5})(?:\s+|$)`)
 
+// parseAllListeningPorts — все порты из вывода ss/netstat, чей бы процесс их ни держал.
+func parseAllListeningPorts(output string) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "State") || strings.HasPrefix(line, "Proto") {
+			continue
+		}
+		for _, m := range portRegex.FindAllStringSubmatch(line, -1) {
+			p, err := strconv.Atoi(m[1])
+			if err == nil && p > 0 && p <= 65535 && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
 func parseListeningPorts(output string) []int {
 	var agentPorts []int
 	var allPorts []int
@@ -648,4 +689,85 @@ func (d *SSHDeployer) runCommandWithOutput(client *ssh.Client, target TargetConf
 		}
 	}
 	return stdout.String(), stderr.String(), exitCode, nil
+}
+
+// installPlugins проверяет, что на хосте есть нужные плагинам программы, и
+// раскладывает их проекты. Версия, которая уже стоит, заново не загружается.
+func (d *SSHDeployer) installPlugins(ctx context.Context, client *ssh.Client, target TargetConfig, plugins []PluginFiles) error {
+	if len(plugins) == 0 {
+		return nil
+	}
+	var requires []string
+	seen := map[string]bool{}
+	for _, p := range plugins {
+		if !safeArg.MatchString(p.Dir) || !strings.HasPrefix(p.Dir, pluginsRoot+"/") || strings.Contains(p.Dir, "..") {
+			return fmt.Errorf("plugin %s: invalid install dir %q", p.Name, p.Dir)
+		}
+		for _, r := range p.Requires {
+			if !safeArg.MatchString(r) || strings.Contains(r, "/") {
+				return fmt.Errorf("plugin %s: invalid requirement %q", p.Name, r)
+			}
+			if !seen[r] {
+				seen[r] = true
+				requires = append(requires, r)
+			}
+		}
+	}
+	if len(requires) > 0 {
+		cmd := "missing=''; for c in " + strings.Join(requires, " ") + "; do command -v \"$c\" >/dev/null 2>&1 || missing=\"$missing $c\"; done; " +
+			"if [ -n \"$missing\" ]; then echo $missing >&2; exit 1; fi"
+		_, stderr, code, err := d.runCommandWithOutput(client, target, cmd)
+		if err != nil {
+			return fmt.Errorf("failed to check plugin requirements: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("%w: %s", ErrPluginRequirements, strings.TrimSpace(stderr))
+		}
+	}
+
+	for _, p := range plugins {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, _, code, err := d.runCommandWithOutput(client, target, "test -f "+p.Dir+"/.hf-complete")
+		if err != nil {
+			return fmt.Errorf("plugin %s: %w", p.Name, err)
+		}
+		if code == 0 {
+			continue // эта версия уже на хосте
+		}
+		tmp := "/tmp/hf_plugin_" + strings.TrimPrefix(p.Dir, pluginsRoot+"/") + ".tgz"
+		if err := d.uploadFile(client, tmp, p.Archive); err != nil {
+			return fmt.Errorf("failed to upload plugin %s: %w", p.Name, err)
+		}
+		// Распаковка во временный каталог и переименование: недоделанная установка
+		// не выглядит готовой (.hf-complete появляется последним).
+		install := "mkdir -p " + pluginsRoot + " && rm -rf " + p.Dir + ".tmp && mkdir -p " + p.Dir + ".tmp && " +
+			"tar -xzf " + tmp + " -C " + p.Dir + ".tmp --no-same-owner && " +
+			"chmod -R u+rwX,go+rX,go-w " + p.Dir + ".tmp && touch " + p.Dir + ".tmp/.hf-complete && " +
+			"rm -rf " + p.Dir + " && mv " + p.Dir + ".tmp " + p.Dir + " && rm -f " + tmp + "; " +
+			"r=$?; if command -v restorecon >/dev/null 2>&1; then restorecon -RF " + p.Dir + " >/dev/null 2>&1; fi; exit $r"
+		if err := d.runCommand(client, target, install); err != nil {
+			return fmt.Errorf("failed to install plugin %s: %w", p.Name, err)
+		}
+	}
+	// Агент работает как nobody: каталог, куда его программы могут писать.
+	dataCmd := "mkdir -p " + pluginDataDir + " && chown nobody " + pluginDataDir + " && chmod 0750 " + pluginDataDir
+	if err := d.runCommand(client, target, dataCmd); err != nil {
+		return fmt.Errorf("failed to prepare plugin data dir: %w", err)
+	}
+	return nil
+}
+
+// prunePluginsCmd удаляет с хоста версии плагинов, которые не нужны текущему конфигу.
+func prunePluginsCmd(plugins []PluginFiles) string {
+	if len(plugins) == 0 {
+		return "rm -rf " + pluginsRoot
+	}
+	keep := make([]string, 0, len(plugins))
+	for _, p := range plugins {
+		keep = append(keep, strings.TrimPrefix(p.Dir, pluginsRoot+"/"))
+	}
+	return "cd " + pluginsRoot + " 2>/dev/null || exit 0; for d in *; do case \"$d\" in " +
+		strings.Join(keep, "|") + ") ;; *) rm -rf \"./$d\" ;; esac; done"
 }

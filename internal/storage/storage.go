@@ -58,6 +58,14 @@ type Storage interface {
 	TouchTrap(ctx context.Context, token string) error
 
 	GetStats(ctx context.Context) (*models.Stats, error)
+
+	// --- plugins (свои ловушки) ---
+	ListPlugins(ctx context.Context) ([]models.Plugin, error)
+	GetPlugin(ctx context.Context, name string) (*models.Plugin, error)
+	GetPluginArchive(ctx context.Context, name string) ([]byte, error)
+	// SavePlugin добавляет плагин или заменяет загруженный ранее с тем же именем.
+	SavePlugin(ctx context.Context, p models.Plugin, archive []byte) (*models.Plugin, error)
+	DeletePlugin(ctx context.Context, name string) error
 	// GetDashboard aggregates events of the last window, split into buckets of the given size;
 	// buckets are aligned to local time of the given UTC offset.
 	GetDashboard(ctx context.Context, window, bucket, utcOffset time.Duration) (*models.Dashboard, error)

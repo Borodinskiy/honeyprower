@@ -244,3 +244,13 @@ type SourceCount struct {
 	Traps    int     `json:"traps"` // сколько разных ловушек задел
 	LastTS   float64 `json:"lastTs"`
 }
+
+// Plugin — своя ловушка: загруженный проект пользователя (см. internal/plugin).
+// Архив хранится отдельно и в списках не передаётся.
+type Plugin struct {
+	Name       string          `json:"name"`
+	Manifest   json.RawMessage `json:"manifest"`
+	SHA256     string          `json:"sha256"`
+	Size       int64           `json:"size"`
+	UploadedAt time.Time       `json:"uploadedAt"`
+}

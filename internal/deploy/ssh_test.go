@@ -339,6 +339,7 @@ func TestDeploy_RootSuccess(t *testing.T) {
 		activateCmd,
 		verifyCmd,
 		saveGoodCmd,
+		prunePluginsCmd(nil), // своих ловушек нет — их каталог убирается
 	}
 
 	if len(server.commands) != len(expectedCommands) {
@@ -407,13 +408,13 @@ func TestDeploy_SudoSuccess(t *testing.T) {
 			sudoCmdCount++
 		}
 	}
-	if sudoCmdCount != 6 {
-		t.Errorf("expected 6 sudo commands (install bin, install cfg, install svc, systemctl, verify, save good), got %d: %v", sudoCmdCount, server.commands)
+	if sudoCmdCount != 7 {
+		t.Errorf("expected 7 sudo commands (install bin, install cfg, install svc, systemctl, verify, save good, prune plugins), got %d: %v", sudoCmdCount, server.commands)
 	}
 
 	// Verify the sudo password passed on stdin
-	if len(server.sudoPasswords) != 6 {
-		t.Fatalf("expected 6 sudo password prompts, got %d", len(server.sudoPasswords))
+	if len(server.sudoPasswords) != 7 {
+		t.Fatalf("expected 7 sudo password prompts, got %d", len(server.sudoPasswords))
 	}
 	for i, pass := range server.sudoPasswords {
 		if pass != "rootpassword123" {

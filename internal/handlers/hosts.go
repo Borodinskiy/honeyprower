@@ -80,18 +80,23 @@ func (h *Handlers) ListHosts(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to load traps")
 		return
 	}
+	cs, err := h.loadClasses(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap classes")
+		return
+	}
 	for i := range hosts {
-		fillHostView(&hosts[i], traps)
+		fillHostView(&hosts[i], traps, cs)
 	}
 	httpx.WriteJSON(w, http.StatusOK, hosts)
 }
 
 func (h *Handlers) GetHost(w http.ResponseWriter, r *http.Request) {
-	host, traps, ok := h.loadHost(w, r)
+	host, traps, cs, ok := h.loadHost(w, r)
 	if !ok {
 		return
 	}
-	fillHostView(host, traps)
+	fillHostView(host, traps, cs)
 	httpx.WriteJSON(w, http.StatusOK, host)
 }
 
@@ -114,7 +119,7 @@ func (h *Handlers) CreateHost(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to create host")
 		return
 	}
-	fillHostView(created, nil)
+	fillHostView(created, nil, nil)
 	httpx.WriteJSON(w, http.StatusCreated, created)
 }
 
@@ -160,7 +165,8 @@ func (h *Handlers) UpdateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	traps, _ := h.Store.ListTraps(r.Context())
-	fillHostView(updated, traps)
+	cs, _ := h.loadClasses(r.Context())
+	fillHostView(updated, traps, cs)
 	httpx.WriteJSON(w, http.StatusOK, updated)
 }
 
@@ -199,7 +205,7 @@ func (h *Handlers) DeleteHost(w http.ResponseWriter, r *http.Request) {
 
 // HostConfig отдаёт config.json агента хоста — для ручного запуска без SSH.
 func (h *Handlers) HostConfig(w http.ResponseWriter, r *http.Request) {
-	host, traps, ok := h.loadHost(w, r)
+	host, traps, cs, ok := h.loadHost(w, r)
 	if !ok {
 		return
 	}
@@ -208,7 +214,7 @@ func (h *Handlers) HostConfig(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusConflict, "host has no enabled traps")
 		return
 	}
-	cfg := h.buildHostConfig(r, active)
+	cfg := h.buildHostConfig(r, active, cs, false)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="honeyforge-host-%d.json"`, host.ID))
 	enc := json.NewEncoder(w)
@@ -218,7 +224,7 @@ func (h *Handlers) HostConfig(w http.ResponseWriter, r *http.Request) {
 
 // DeployHost ставит (или обновляет) агента хоста со всеми его включёнными ловушками.
 func (h *Handlers) DeployHost(w http.ResponseWriter, r *http.Request) {
-	host, traps, ok := h.loadHost(w, r)
+	host, traps, cs, ok := h.loadHost(w, r)
 	if !ok {
 		return
 	}
@@ -237,8 +243,8 @@ func (h *Handlers) DeployHost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cfg := h.buildHostConfig(r, active)
-	payload, status, msg := h.agentPayload(&cfg, target)
+	cfg := h.buildHostConfig(r, active, cs, true)
+	payload, status, msg := h.agentPayload(r.Context(), &cfg, target)
 	if msg != "" {
 		httpx.WriteError(w, status, msg)
 		return
@@ -260,7 +266,7 @@ func (h *Handlers) DeployHost(w http.ResponseWriter, r *http.Request) {
 
 	// Агент уже стоит — отметку пишем, даже если клиент успел отключиться.
 	now := time.Now().UTC()
-	if err := h.Store.SetHostDeployed(context.WithoutCancel(r.Context()), host.ID, &now, trapsHash(active)); err != nil {
+	if err := h.Store.SetHostDeployed(context.WithoutCancel(r.Context()), host.ID, &now, trapsHash(active, cs)); err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "agent deployed, but failed to record it")
 		return
 	}
@@ -271,7 +277,7 @@ func (h *Handlers) DeployHost(w http.ResponseWriter, r *http.Request) {
 
 // UndeployHost останавливает агента хоста и удаляет его файлы с сервера.
 func (h *Handlers) UndeployHost(w http.ResponseWriter, r *http.Request) {
-	host, _, ok := h.loadHost(w, r)
+	host, _, _, ok := h.loadHost(w, r)
 	if !ok {
 		return
 	}
@@ -301,7 +307,7 @@ func (h *Handlers) UndeployHost(w http.ResponseWriter, r *http.Request) {
 
 // HostStatus спрашивает у сервера по SSH, работает ли агент и какие порты слушаются.
 func (h *Handlers) HostStatus(w http.ResponseWriter, r *http.Request) {
-	host, traps, ok := h.loadHost(w, r)
+	host, traps, cs, ok := h.loadHost(w, r)
 	if !ok {
 		return
 	}
@@ -322,15 +328,23 @@ func (h *Handlers) HostStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := hostStatusResponse{ServiceStatus: st, HostID: host.ID, ExpectedPorts: []string{}, MissingPorts: []string{}}
-	listening := map[string]bool{}
+	listening, listeningAll := map[string]bool{}, map[string]bool{}
 	for _, p := range st.Listening {
 		listening[fmt.Sprintf("%d/tcp", p)] = true
 	}
+	for _, p := range st.ListeningAll {
+		listeningAll[fmt.Sprintf("%d/tcp", p)] = true
+	}
 	for _, t := range deployableTraps(host.ID, traps) {
-		for _, s := range trapSockets(&t) {
+		// Порт своей ловушки в режиме service держит её программа, а не агент.
+		seen := listening
+		if p := cs.plugin(t.Class); p != nil && p.manifest.Mode == "service" {
+			seen = listeningAll
+		}
+		for _, s := range trapSockets(&t, cs) {
 			resp.ExpectedPorts = append(resp.ExpectedPorts, s)
 			// UDP-порты ss -tlpn не показывает — их отсутствие ничего не значит.
-			if st.Active && strings.HasSuffix(s, "/tcp") && !listening[s] {
+			if st.Active && strings.HasSuffix(s, "/tcp") && !seen[s] {
 				resp.MissingPorts = append(resp.MissingPorts, s)
 			}
 		}
@@ -341,27 +355,32 @@ func (h *Handlers) HostStatus(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // loadHost берёт хост из пути и все ловушки. При ошибке отвечает сам.
-func (h *Handlers) loadHost(w http.ResponseWriter, r *http.Request) (*models.Host, []models.Trap, bool) {
+func (h *Handlers) loadHost(w http.ResponseWriter, r *http.Request) (*models.Host, []models.Trap, *classSet, bool) {
 	id, err := parseID(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid id")
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	host, err := h.Store.GetHost(r.Context(), id)
 	if errors.Is(err, storage.ErrNotFound) {
 		httpx.WriteError(w, http.StatusNotFound, "host not found")
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to load host")
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	traps, err := h.Store.ListTraps(r.Context())
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to load traps")
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
-	return host, traps, true
+	cs, err := h.loadClasses(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load trap classes")
+		return nil, nil, nil, false
+	}
+	return host, traps, cs, true
 }
 
 // lockHost не даёт двум операциям над одним хостом идти одновременно: два
@@ -542,8 +561,9 @@ func deployableTraps(hostID int64, all []models.Trap) []models.Trap {
 
 // trapsHash — отпечаток того, что развёрнуто на хосте. Разошёлся с текущими
 // ловушками — на сервере старая версия. Имя не входит: переименование не
-// меняет поведения ловушки, и пересобирать агента ради него незачем.
-func trapsHash(traps []models.Trap) string {
+// меняет поведения ловушки, и пересобирать агента ради него незачем. Версия
+// плагина входит: новая загрузка своей ловушки требует обновить хосты.
+func trapsHash(traps []models.Trap, cs *classSet) string {
 	type item struct {
 		ID     int64           `json:"id"`
 		Token  string          `json:"token"`
@@ -553,10 +573,15 @@ func trapsHash(traps []models.Trap) string {
 		Port   int             `json:"port"`
 		Ports  string          `json:"ports"`
 		Params json.RawMessage `json:"params"`
+		Plugin string          `json:"plugin,omitempty"`
 	}
 	items := make([]item, 0, len(traps))
 	for _, t := range traps {
-		items = append(items, item{t.ID, t.Token, t.PubKey, t.Class, t.Bind, t.Port, t.Ports, canonicalJSON(t.Params)})
+		sha := ""
+		if cs != nil {
+			sha = cs.pluginSHA(t.Class)
+		}
+		items = append(items, item{t.ID, t.Token, t.PubKey, t.Class, t.Bind, t.Port, t.Ports, canonicalJSON(t.Params), sha})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	b, _ := json.Marshal(items)
@@ -582,7 +607,7 @@ func canonicalJSON(raw json.RawMessage) json.RawMessage {
 }
 
 // fillHostView заполняет производные поля хоста по его ловушкам.
-func fillHostView(host *models.Host, traps []models.Trap) {
+func fillHostView(host *models.Host, traps []models.Trap, cs *classSet) {
 	host.HasPassword = host.PasswordEnc != ""
 	host.HasPrivateKey = host.PrivateKeyEnc != ""
 	host.HasSudoPassword = host.SudoPasswordEnc != ""
@@ -599,5 +624,5 @@ func fillHostView(host *models.Host, traps []models.Trap) {
 			host.OnlineTraps++
 		}
 	}
-	host.PendingChanges = host.DeployedAt != nil && host.DeployedHash != trapsHash(deployableTraps(host.ID, traps))
+	host.PendingChanges = host.DeployedAt != nil && host.DeployedHash != trapsHash(deployableTraps(host.ID, traps), cs)
 }

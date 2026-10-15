@@ -774,3 +774,76 @@ func isUniqueViolation(err error) bool {
 	}
 	return strings.Contains(err.Error(), "23505") || strings.Contains(err.Error(), "duplicate key value")
 }
+
+// ---------------- plugins ----------------
+
+func (p *Postgres) ListPlugins(ctx context.Context) ([]models.Plugin, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT name, manifest, sha256, size, uploaded_at FROM plugins ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.Plugin{}
+	for rows.Next() {
+		var pl models.Plugin
+		var manifest []byte
+		if err := rows.Scan(&pl.Name, &manifest, &pl.SHA256, &pl.Size, &pl.UploadedAt); err != nil {
+			return nil, err
+		}
+		pl.Manifest = manifest
+		out = append(out, pl)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) GetPlugin(ctx context.Context, name string) (*models.Plugin, error) {
+	var pl models.Plugin
+	var manifest []byte
+	err := p.db.QueryRowContext(ctx, `SELECT name, manifest, sha256, size, uploaded_at FROM plugins WHERE name = $1`, name).
+		Scan(&pl.Name, &manifest, &pl.SHA256, &pl.Size, &pl.UploadedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	pl.Manifest = manifest
+	return &pl, nil
+}
+
+func (p *Postgres) GetPluginArchive(ctx context.Context, name string) ([]byte, error) {
+	var archive []byte
+	err := p.db.QueryRowContext(ctx, `SELECT archive FROM plugins WHERE name = $1`, name).Scan(&archive)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return archive, err
+}
+
+func (p *Postgres) SavePlugin(ctx context.Context, pl models.Plugin, archive []byte) (*models.Plugin, error) {
+	out := pl
+	var manifest []byte
+	err := p.db.QueryRowContext(ctx, `
+		INSERT INTO plugins (name, manifest, sha256, size, archive, uploaded_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (name) DO UPDATE SET manifest = EXCLUDED.manifest, sha256 = EXCLUDED.sha256,
+			size = EXCLUDED.size, archive = EXCLUDED.archive, uploaded_at = NOW()
+		RETURNING manifest, size, uploaded_at`,
+		pl.Name, []byte(pl.Manifest), pl.SHA256, len(archive), archive).Scan(&manifest, &out.Size, &out.UploadedAt)
+	if err != nil {
+		return nil, err
+	}
+	out.Manifest = manifest
+	return &out, nil
+}
+
+func (p *Postgres) DeletePlugin(ctx context.Context, name string) error {
+	res, err := p.db.ExecContext(ctx, `DELETE FROM plugins WHERE name = $1`, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
