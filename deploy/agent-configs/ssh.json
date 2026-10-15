@@ -1,0 +1,10 @@
+{
+  "center_url": "http://app:8080",
+  "token": "demo-ssh-banner-token",
+  "trap": {
+    "class": "banner",
+    "bind": "0.0.0.0",
+    "port": 2222,
+    "params": { "banner": "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10\r\n", "close_after_input": true }
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "name": "Redis 7 (без пароля?)",
+  "class": "dialog",
+  "port": 6379,
+  "tags": [
+    "redis",
+    "db"
+  ],
+  "description": "Redis RESP: логирует команды (CONFIG SET, SLAVEOF, MODULE LOAD — типичные атаки), AUTH захватывается.",
+  "params": {
+    "greeting": "",
+    "decoder": "resp",
+    "default_response": "-NOAUTH Authentication required.\\r\\n",
+    "rules": [
+      {
+        "state": "*",
+        "match": "^PING",
+        "response": "+PONG\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^AUTH\\s+(\\S+)\\s+(\\S+)$",
+        "response": "-WRONGPASS invalid username-password pair or user is disabled.\\r\\n",
+        "capture": "username_password",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^AUTH\\s+(\\S+)$",
+        "response": "-WRONGPASS invalid username-password pair or user is disabled.\\r\\n",
+        "capture": "password",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^INFO",
+        "response": "$90\\r\\n# Server\\r\\nredis_version:7.2.4\\r\\nredis_mode:standalone\\r\\nos:Linux 5.15.0-105-generic x86_64\\r\\n\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^QUIT",
+        "response": "+OK\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": true,
+        "log": true
+      }
+    ]
+  },
+  "probe": [
+    "PING",
+    "INFO",
+    "AUTH default secret",
+    "CONFIG SET dir /tmp"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

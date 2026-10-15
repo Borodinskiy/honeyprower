@@ -1,0 +1,36 @@
+{
+  "name": "router-login",
+  "title": "Вход в роутер (пример)",
+  "description": "Пример своей ловушки в режиме service: Python-сервер сам слушает порт, спрашивает логин и пароль и сообщает о каждой попытке входа.",
+  "version": "1.0.0",
+  "mode": "service",
+  "transport": "tcp",
+  "command": ["python3", "server.py"],
+  "default_port": 2323,
+  "requires": ["python3"],
+  "params": [
+    {
+      "key": "hostname",
+      "title": "Имя устройства",
+      "type": "string",
+      "default": "RT-AC68U",
+      "help": "Показывается в приглашении входа."
+    },
+    {
+      "key": "max_attempts",
+      "title": "Попыток входа",
+      "type": "int",
+      "default": 3,
+      "min": 1,
+      "max": 10
+    },
+    {
+      "key": "motd",
+      "title": "Сообщение после «входа»",
+      "type": "text",
+      "default": "",
+      "help": "Пусто — вход всегда неудачный.",
+      "advanced": true
+    }
+  ]
+}

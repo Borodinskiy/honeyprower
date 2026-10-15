@@ -203,3 +203,107 @@ func TestFullAuthSessionLifecycle(t *testing.T) {
 		t.Fatalf("expected redirect to /login.html after logout, got %d to %s", recDashAfter.Code, recDashAfter.Header().Get("Location"))
 	}
 }
+
+func TestStealthRoutesInWebMux(t *testing.T) {
+	store := storage.NewInMemory()
+	authMgr := auth.NewManager()
+	h := handlers.New(store, authMgr)
+	apiHandler := router.NewAPI(h, authMgr)
+
+	cfg := &config.Config{
+		WebAddr:   ":8080",
+		APIAddr:   ":8081",
+		StaticDir: t.TempDir(),
+	}
+	webMux := NewWebMux(cfg, authMgr, apiHandler)
+
+	stealthPaths := []string{"/cdn-cgi/rum", "/v1/rgstr", "/api/v2/metrics"}
+	for _, p := range stealthPaths {
+		req := httptest.NewRequest("POST", p, strings.NewReader("dummy-raw-data"))
+		req.Header.Set("Content-Type", "application/octet-stream")
+		rec := httptest.NewRecorder()
+		webMux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Errorf("expected 204 No Content for %s, got %d: %s", p, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// Маршруты хостов отдают SSH-доступ к серверам — без сессии оператора они закрыты.
+func TestHostRoutesRequireAuth(t *testing.T) {
+	store := storage.NewInMemory()
+	authMgr := auth.NewManager()
+	h := handlers.New(store, authMgr)
+	cfg := &config.Config{StaticDir: t.TempDir()}
+	webMux := NewWebMux(cfg, authMgr, router.NewAPI(h, authMgr))
+	token, err := authMgr.CreateToken(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	routes := []struct{ method, path string }{
+		{"GET", "/api/hosts"},
+		{"POST", "/api/hosts"},
+		{"GET", "/api/hosts/1"},
+		{"PATCH", "/api/hosts/1"},
+		{"DELETE", "/api/hosts/1"},
+		{"GET", "/api/hosts/1/config"},
+		{"GET", "/api/hosts/1/status"},
+		{"POST", "/api/hosts/1/deploy"},
+		{"POST", "/api/hosts/1/undeploy"},
+	}
+	for _, rt := range routes {
+		req := httptest.NewRequest(rt.method, rt.path, strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		webMux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without session: %d, want 401", rt.method, rt.path, rec.Code)
+		}
+
+		req = httptest.NewRequest(rt.method, rt.path, strings.NewReader("{}"))
+		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
+		rec = httptest.NewRecorder()
+		webMux.ServeHTTP(rec, req)
+		// Маршрут существует: хоста 1 нет (404 с JSON) или тело неполное (400), но не 401/405.
+		if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusMethodNotAllowed ||
+			!strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
+			t.Errorf("%s %s with session: %d %q", rt.method, rt.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestLoadSecretBox(t *testing.T) {
+	// Из файла: создаётся при первом запуске и переживает перезапуск.
+	path := filepath.Join(t.TempDir(), "data", "secret.key")
+	b1, err := loadSecretBox(&config.Config{SecretKeyFile: path})
+	if err != nil {
+		t.Fatalf("key file: %v", err)
+	}
+	sealed, _ := b1.Seal("pw")
+	b2, err := loadSecretBox(&config.Config{SecretKeyFile: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := b2.Open(sealed); err != nil || got != "pw" {
+		t.Fatalf("after restart: %q, %v", got, err)
+	}
+
+	// HF_SECRET_KEY важнее файла.
+	b3, err := loadSecretBox(&config.Config{SecretKey: "a long enough passphrase", SecretKeyFile: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b3.Open(sealed); err == nil {
+		t.Fatal("env key must take precedence over the key file")
+	}
+
+	if _, err := loadSecretBox(&config.Config{SecretKey: "short"}); err == nil {
+		t.Fatal("weak HF_SECRET_KEY must be rejected")
+	}
+	// Файл ключа в недоступном месте — ошибка, а не тихий временный ключ.
+	blocker := filepath.Join(t.TempDir(), "file")
+	_ = os.WriteFile(blocker, nil, 0o600)
+	if _, err := loadSecretBox(&config.Config{SecretKeyFile: filepath.Join(blocker, "secret.key")}); err == nil {
+		t.Fatal("unwritable key path must be an error")
+	}
+}

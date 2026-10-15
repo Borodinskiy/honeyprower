@@ -2,6 +2,11 @@ package storage
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"log"
 
 	"golang.org/x/crypto/bcrypt"
@@ -9,13 +14,11 @@ import (
 	"honeyprower/internal/models"
 )
 
-// Seed populates demo data (admin/admin + 3 traps with events).
-// Delete this call in main.go when you wire a real DB.
-// TODO: реализовать реальную базу данных
+// Seed populates demo data for the in-memory store (admin/admin + example
+// trap definitions). The Postgres store seeds itself from migrations/002_seed.sql.
 func Seed(s *Memory) {
 	ctx := context.Background()
 
-	// demo user: admin / admin
 	hash, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 	if err != nil {
 		log.Printf("seed: bcrypt: %v", err)
@@ -31,55 +34,30 @@ func Seed(s *Memory) {
 		log.Printf("Using InMemory database. Administrator auth data: %s:%s", "admin", "admin")
 	}
 
-	type seedTrap struct {
-		in       models.TrapCreate
-		warnings int
-		total    int
-		last     string
-		events   []models.Event
+	demo := []struct {
+		in    models.TrapCreate
+		token string
+	}{
+		{models.TrapCreate{Name: "SSH баннер (демо, low)", Class: "banner", Bind: "0.0.0.0", Port: 2222,
+			Params: json.RawMessage(`{"banner":"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10\r\n","close_after_input":true}`), Enabled: true}, "demo-ssh-banner-token"},
+		{models.TrapCreate{Name: "FTP vsftpd (демо, medium)", Class: "dialog", Bind: "0.0.0.0", Port: 2121,
+			Params: json.RawMessage(`{"greeting":"220 (vsFTPd 3.0.5)\r\n","decoder":"line","rules":[{"match":"^USER\\s+(.*)$","response":"331 Please specify the password.\r\n","capture":"username"},{"match":"^PASS\\s?(.*)$","response":"530 Login incorrect.\r\n","capture":"password"},{"match":"^QUIT","response":"221 Goodbye.\r\n","close":true}]}`), Enabled: true}, "demo-ftp-token"},
+		{models.TrapCreate{Name: "IEC-104 Substation (демо, ics)", Class: "iec104", Bind: "0.0.0.0", Port: 2404,
+			Params: json.RawMessage(`{}`), Enabled: true}, "demo-iec104-token"},
+		{models.TrapCreate{Name: "Modbus SCADA Gateway (демо, ics)", Class: "scada", Bind: "0.0.0.0", Port: 502,
+			Params: json.RawMessage(`{}`), Enabled: true}, "demo-scada-token"},
+		{models.TrapCreate{Name: "High-Interaction Shell (демо, high)", Class: "high_interaction", Bind: "0.0.0.0", Port: 2224,
+			Params: json.RawMessage(`{}`), Enabled: true}, "demo-high-shell-token"},
 	}
-
-	seeds := []seedTrap{
-		{
-			in:       models.TrapCreate{Name: "SSH Honeypot", Type: "SSH", Target: "192.168.1.10:22", Active: true},
-			warnings: 142, total: 1420, last: "2 мин назад",
-			events: []models.Event{
-				{Type: "connection", Source: "10.0.0.42", Time: "2024-01-15 12:34:56", Detail: "SSH-2.0-OpenSSH_8.2"},
-				{Type: "auth", Source: "192.168.1.50", Time: "2024-01-15 11:20:11", Detail: "user=root pass=admin"},
-				{Type: "scan", Source: "203.0.113.5", Time: "2024-01-15 09:15:33", Detail: "nmap -sV"},
-			},
-		},
-		{
-			in:       models.TrapCreate{Name: "Web Trap", Type: "Web", Target: "http://10.0.0.5/", Active: true},
-			warnings: 87, total: 870, last: "15 мин назад",
-			events: []models.Event{
-				{Type: "connection", Source: "198.51.100.7", Time: "2024-01-15 14:22:01", Detail: "GET /admin.php"},
-			},
-		},
-		{
-			in:       models.TrapCreate{Name: "FTP Trap", Type: "FTP", Target: "192.168.1.12:21", Active: false},
-			warnings: 0, total: 0, last: "—",
-			events: []models.Event{},
-		},
-	}
-
-	for _, sd := range seeds {
-		created, err := s.CreateTrap(ctx, sd.in)
-		if err != nil {
+	for _, d := range demo {
+		sha := sha256.Sum256([]byte(d.token))
+		d.in.KeyID = hex.EncodeToString(sha[:8])
+		if priv, err := ecdh.X25519().GenerateKey(rand.Reader); err == nil {
+			d.in.PubKey = hex.EncodeToString(priv.PublicKey().Bytes())
+			d.in.PrivKey = hex.EncodeToString(priv.Bytes())
+		}
+		if _, err := s.CreateTrap(ctx, d.in, d.token); err != nil {
 			log.Printf("seed: trap: %v", err)
-			continue
 		}
-		s.mu.Lock()
-		t := s.traps[created.ID]
-		t.Warnings = sd.warnings
-		t.TotalEvents = sd.total
-		t.LastEventAt = sd.last
-		evs := make([]models.Event, len(sd.events))
-		for i, e := range sd.events {
-			e.ID = s.nextIDLocked()
-			evs[i] = e
-		}
-		s.events[created.ID] = evs
-		s.mu.Unlock()
 	}
 }

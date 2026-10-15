@@ -1,0 +1,69 @@
+services:
+  db:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-honeyforge}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-honeyforge}
+      POSTGRES_DB: ${DB_NAME:-honeyforge}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Центр управления: веб-интерфейс оператора + API + приём скрытной телеметрии.
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-honeyforge}
+      DB_PASSWORD: ${DB_PASSWORD:-honeyforge}
+      DB_NAME: ${DB_NAME:-honeyforge}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      # Внешний адрес центра, который увидят агенты на удалённых серверах (нужен для деплоя по SSH).
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      # Ключ шифрования SSH-паролей хостов. Пусто — ключ создаётся в томе appdata (data/secret.key).
+      HF_SECRET_KEY: ${HF_SECRET_KEY:-}
+      # true — центр сам генерирует демо-атаки для показа дашборда; false — удаляет их при запуске.
+      DEMO_DATA: ${DEMO_DATA:-false}
+    volumes:
+      - appdata:/app/data
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+
+  # Демо-ловушка Low Interaction: SSH-баннер.
+  ssh-trap:
+    build:
+      context: ./agent
+    restart: unless-stopped
+    depends_on:
+      - app
+    volumes:
+      - ./deploy/agent-configs/ssh.json:/config/config.json:ro,Z
+    ports:
+      - "${SSH_TRAP_PORT:-2222}:2222"
+
+  # Демо-ловушка Medium Interaction: fake-FTP с перехватом учетных данных.
+  ftp-trap:
+    build:
+      context: ./agent
+    restart: unless-stopped
+    depends_on:
+      - app
+    volumes:
+      - ./deploy/agent-configs/ftp.json:/config/config.json:ro,Z
+    ports:
+      - "${FTP_TRAP_PORT:-2121}:2121"
+
+volumes:
+  pgdata:
+  appdata:

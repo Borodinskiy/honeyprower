@@ -1,0 +1,18 @@
+{
+  "name": "Детектор сканирования",
+  "class": "port_listener",
+  "tags": [
+    "scan"
+  ],
+  "description": "Набор «тихих» портов: любое подключение — событие, 3+ порта от одного IP за минуту — scan.",
+  "params": {
+    "ports": "9000-9003,10443,15432",
+    "action": "read_then_close",
+    "scan_threshold": 3
+  },
+  "probe": [
+    "hello"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

@@ -12,8 +12,8 @@ func TestEmbeddedMigrations(t *testing.T) {
 	if !strings.Contains(SchemaSQL, "CREATE TABLE IF NOT EXISTS users") {
 		t.Errorf("SchemaSQL missing users table creation")
 	}
-	if !strings.Contains(SchemaSQL, "last_event_at TIMESTAMPTZ") {
-		t.Errorf("SchemaSQL missing last_event_at TIMESTAMPTZ")
+	if !strings.Contains(SchemaSQL, "CREATE TABLE IF NOT EXISTS traps") {
+		t.Errorf("SchemaSQL missing traps table creation")
 	}
 
 	if SeedSQL == "" {
@@ -22,7 +22,7 @@ func TestEmbeddedMigrations(t *testing.T) {
 	if !strings.Contains(SeedSQL, "admin@example.com") {
 		t.Errorf("SeedSQL missing admin user")
 	}
-	if !strings.Contains(SeedSQL, "SSH Honeypot") {
-		t.Errorf("SeedSQL missing SSH Honeypot")
+	if !strings.Contains(SeedSQL, "banner") {
+		t.Errorf("SeedSQL missing example trap")
 	}
 }

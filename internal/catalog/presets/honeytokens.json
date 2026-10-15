@@ -1,0 +1,33 @@
+{
+  "name": "Honeytokens (ссылка + учётка)",
+  "class": "honeytoken",
+  "port": 8088,
+  "tags": [
+    "honeytoken"
+  ],
+  "description": "Ссылка-маячок и учётка-приманка. Вход с учёткой в любую ловушку → событие token.",
+  "params": {
+    "public_base_url": "http://127.0.0.1:8088",
+    "tokens": [
+      {
+        "kind": "url",
+        "label": "share/finance/README.html",
+        "token": "",
+        "username": "",
+        "password": ""
+      },
+      {
+        "kind": "credentials",
+        "label": "git/infra/.env",
+        "token": "",
+        "username": "svc_backup",
+        "password": ""
+      }
+    ]
+  },
+  "probe": [
+    "GET /"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

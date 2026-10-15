@@ -1,16 +1,35 @@
+-- Оператор по умолчанию: admin / admin (bcrypt-хэш пароля "admin").
 INSERT INTO users (username, email, password_hash)
 VALUES ('admin', 'admin@example.com', '$2a$10$wL978Q.q5X5rxRR9cjuUy.AJrhsTzZkBDt4Hi4u0NJVHdDBgpgQFu')
 ON CONFLICT (username) DO NOTHING;
 
-INSERT INTO traps (name, type, target, active, warnings, total_events, last_event_at)
-VALUES 
-('SSH Honeypot', 'SSH', '192.168.1.10:22', TRUE, 142, 1420, NOW() - INTERVAL '2 minutes'),
-('Web Trap', 'Web', 'http://10.0.0.5/', TRUE, 87, 870, NOW() - INTERVAL '15 minutes'),
-('FTP Trap', 'FTP', '192.168.1.12:21', FALSE, 0, 0, NULL);
-
-INSERT INTO events (trap_id, type, source, time, detail)
-VALUES
-((SELECT id FROM traps WHERE name = 'SSH Honeypot' ORDER BY id LIMIT 1), 'connection', '10.0.0.42', '2024-01-15 12:34:56', 'SSH-2.0-OpenSSH_8.2'),
-((SELECT id FROM traps WHERE name = 'SSH Honeypot' ORDER BY id LIMIT 1), 'auth', '192.168.1.50', '2024-01-15 11:20:11', 'user=root pass=admin'),
-((SELECT id FROM traps WHERE name = 'SSH Honeypot' ORDER BY id LIMIT 1), 'scan', '203.0.113.5', '2024-01-15 09:15:33', 'nmap -sV'),
-((SELECT id FROM traps WHERE name = 'Web Trap' ORDER BY id LIMIT 1), 'connection', '198.51.100.7', '2024-01-15 14:22:01', 'GET /admin.php');
+-- Две демо-ловушки с фиксированными токенами: под них есть готовые конфиги
+-- агентов (deploy/agent-configs) и сервисы в docker-compose. В бою создавайте
+-- ловушки на сайте — тогда токен будет случайным.
+INSERT INTO traps (name, class, bind, port, params, token, enabled)
+VALUES (
+    'SSH баннер (демо, low)', 'banner', '0.0.0.0', 2222,
+    '{"banner":"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10\r\n","close_after_input":true}'::jsonb,
+    'demo-ssh-banner-token', TRUE
+),
+(
+    'FTP vsftpd (демо, medium)', 'dialog', '0.0.0.0', 2121,
+    '{"greeting":"220 (vsFTPd 3.0.5)\r\n","decoder":"line","default_response":"530 Please login with USER and PASS.\r\n","rules":[{"match":"^USER\\s+(.*)$","response":"331 Please specify the password.\r\n","capture":"username"},{"match":"^PASS\\s?(.*)$","response":"530 Login incorrect.\r\n","capture":"password"},{"match":"^SYST","response":"215 UNIX Type: L8\r\n"},{"match":"^QUIT","response":"221 Goodbye.\r\n","close":true}]}'::jsonb,
+    'demo-ftp-token', TRUE
+),
+(
+    'IEC-104 Substation', 'iec104', '0.0.0.0', 2404,
+    '{"breaker_closed":true,"switch_closed":true,"voltage":220.5,"power":45.2,"frequency":50.0}'::jsonb,
+    'demo-iec104-token', TRUE
+),
+(
+    'Modbus SCADA Gateway', 'scada', '0.0.0.0', 502,
+    '{"vendor_name":"Schneider Electric","product_code":"Modicon M580","revision":"v4.10"}'::jsonb,
+    'demo-scada-token', TRUE
+),
+(
+    'High-Interaction Shell', 'high_interaction', '0.0.0.0', 2222,
+    '{"hostname":"substation-gw01","user":"root","banner":"Linux substation-gw01 5.15.0-88-generic #98-Ubuntu SMP Mon Oct 2 15:18:56 UTC 2023 x86_64\r\n\r\n"}'::jsonb,
+    'demo-high-shell-token', TRUE
+)
+ON CONFLICT (token) DO NOTHING;

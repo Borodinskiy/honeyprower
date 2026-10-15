@@ -1,0 +1,73 @@
+{
+  "name": "HTTP портал входа (Apache)",
+  "class": "http",
+  "port": 8081,
+  "tags": [
+    "http",
+    "web",
+    "auth"
+  ],
+  "description": "Страница входа с захватом логинов из формы, приманки /.env и /wp-login.php. Реальный порт 80.",
+  "params": {
+    "server_header": "Apache/2.4.58 (Ubuntu)",
+    "routes": [
+      {
+        "path": "^/$",
+        "method": "*",
+        "status": 200,
+        "content_type": "text/html; charset=UTF-8",
+        "headers": "",
+        "body": "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Corp Portal — Sign in</title></head><body><h2>Corp Portal</h2><form method=\"post\" action=\"/login\"><input name=\"username\" placeholder=\"Login\"><input name=\"password\" type=\"password\" placeholder=\"Password\"><button>Sign in</button></form></body></html>",
+        "capture_login": false,
+        "tag": ""
+      },
+      {
+        "path": "^/login$",
+        "method": "POST",
+        "status": 200,
+        "content_type": "text/html; charset=UTF-8",
+        "headers": "",
+        "body": "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Corp Portal — Sign in</title></head><body><h2>Corp Portal</h2><p style=\"color:red\">Invalid username or password</p><form method=\"post\" action=\"/login\"><input name=\"username\" placeholder=\"Login\"><input name=\"password\" type=\"password\" placeholder=\"Password\"><button>Sign in</button></form></body></html>",
+        "capture_login": true,
+        "tag": "portal-login"
+      },
+      {
+        "path": "^/login$",
+        "method": "*",
+        "status": 302,
+        "content_type": "text/html; charset=UTF-8",
+        "headers": "Location: /",
+        "body": "",
+        "capture_login": false,
+        "tag": ""
+      },
+      {
+        "path": "^/\\.env$",
+        "method": "*",
+        "status": 200,
+        "content_type": "text/plain",
+        "headers": "",
+        "body": "APP_ENV=production\\nDB_HOST=10.0.0.15\\nDB_USER=portal\\nDB_PASSWORD=Portal2024!\\n",
+        "capture_login": false,
+        "tag": "env-leak"
+      },
+      {
+        "path": "^/wp-login\\.php$",
+        "method": "*",
+        "status": 200,
+        "content_type": "text/html; charset=UTF-8",
+        "headers": "",
+        "body": "<html><body>ERROR: Invalid username.</body></html>",
+        "capture_login": true,
+        "tag": "wp-login"
+      }
+    ]
+  },
+  "probe": [
+    "GET /",
+    "POST /login username=admin&password=123456",
+    "GET /.env"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

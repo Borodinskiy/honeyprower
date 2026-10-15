@@ -11,11 +11,12 @@
     <!-- Шапка -->
     <header>
         <div class="header-left">
-            <div class="logo">🌐</div>
+            <div class="logo">HoneyForge</div>
 
             <nav>
-                <a href="#" class="nav-link active" data-tab="traps">Ловушки</a>
-                <a href="#" class="nav-link" data-tab="stats">Статистика</a>
+                <a href="#" class="nav-link active" data-tab="stats">Статистика</a>
+                <a href="#" class="nav-link" data-tab="traps">Хосты</a>
+                <a href="#" class="nav-link" data-tab="plugins">Свои ловушки</a>
                 <a href="#" class="nav-link" data-tab="events">События</a>
             </nav>
         </div>
@@ -35,7 +36,7 @@
                     <span id="current-user-name">Пользователь</span> ▾
                 </button>
                 <div class="user-dropdown" id="user-dropdown">
-                    <a href="#" data-action="logout" style="color: #d32f2f;">Выйти</a>
+                    <a href="#" data-action="logout">Выйти</a>
                 </div>
             </div>
         </div>
@@ -44,36 +45,171 @@
     <!-- Контент -->
     <main>
         <div class="breadcrumbs">
-            <a href="#">Главная</a> / <span id="current-tab-crumb">Ловушки</span>
+            <a href="#">Главная</a> / <span id="current-tab-crumb">Статистика</span>
         </div>
 
-        <!-- ВКЛАДКА 1: ЛОВУШКИ -->
-        <section id="traps" class="tab-content active">
-            <div class="traps-header">
-                <h1>Ловушки</h1>
-                <div class="traps-actions">
-                    <button class="btn btn-secondary" id="open-events-trap-btn" disabled>События</button>
-                    <button class="btn btn-success" id="open-edit-trap-btn" disabled>Редактировать</button>
-                    <button class="btn btn-danger" id="delete-trap-btn" disabled>Удалить</button>
-                    <button class="btn btn-success" id="open-create-trap-btn">+ Создать ловушку</button>
+        <!-- ВКЛАДКА 1: ХОСТЫ И ИХ ЛОВУШКИ -->
+        <section id="traps" class="tab-content">
+
+            <!-- Список хостов -->
+            <div id="hosts-view">
+                <div class="traps-header">
+                    <h1>Хосты</h1>
+                    <div class="traps-actions">
+                        <button class="btn" id="open-create-host-btn">+ Добавить хост</button>
+                    </div>
                 </div>
+                <p class="field-help page-help">Хост — сервер, на котором один агент держит все свои ловушки. Откройте хост, чтобы добавить ловушки и развернуть агента.</p>
+
+                <div class="traps-toolbar">
+                    <input type="text" id="hosts-search" class="search-input" placeholder="Поиск хостов по названию или адресу...">
+                </div>
+
+                <div class="traps-list" id="hosts-list-container"></div>
             </div>
 
-            <div class="traps-toolbar">
-                <input type="text" id="traps-search" class="search-input" placeholder="Поиск ловушек по названию или IP...">
-            </div>
+            <!-- Хост и его ловушки -->
+            <div id="host-view" hidden>
+                <a href="#" class="back-link" id="back-to-hosts">← Все хосты</a>
 
-            <div class="traps-list" id="traps-list-container"></div>
+                <div class="traps-header">
+                    <div class="host-heading">
+                        <h1 id="host-view-title"></h1>
+                        <div class="host-meta" id="host-view-meta"></div>
+                    </div>
+                    <div class="traps-actions" id="host-actions">
+                        <button class="btn btn-success" id="host-deploy-btn">Развернуть</button>
+                        <button class="btn btn-secondary" id="host-status-btn">Проверить статус</button>
+                        <button class="btn btn-secondary" id="host-undeploy-btn">Снять с сервера</button>
+                        <button class="btn btn-secondary" id="host-config-btn">Скачать config.json</button>
+                        <button class="btn btn-secondary" id="host-edit-btn">Изменить хост</button>
+                        <button class="btn btn-danger" id="host-delete-btn">Удалить хост</button>
+                    </div>
+                </div>
+
+                <div id="host-op-status" class="deploy-status-box" hidden>
+                    <div class="deploy-spinner" id="host-op-spinner"></div>
+                    <div id="host-op-text" class="host-op-text"></div>
+                </div>
+
+                <div class="traps-header traps-subheader">
+                    <h2 id="host-traps-title">Ловушки хоста</h2>
+                    <div class="traps-actions">
+                        <button class="btn btn-secondary" id="open-events-trap-btn" disabled hidden>События</button>
+                        <button class="btn btn-secondary" id="open-edit-trap-btn" disabled hidden>Редактировать</button>
+                        <button class="btn btn-danger" id="delete-trap-btn" disabled hidden>Удалить</button>
+                        <button class="btn" id="open-create-trap-btn">+ Создать ловушку</button>
+                    </div>
+                </div>
+
+                <div class="traps-list" id="traps-list-container"></div>
+            </div>
         </section>
 
         <!-- ВКЛАДКА 2: СТАТИСТИКА -->
-        <section id="stats" class="tab-content">
-            <h1>Статистика</h1>
+        <section id="stats" class="tab-content active">
+            <div class="traps-header">
+                <h1>Статистика</h1>
+                <div class="range-switch" id="dash-range" role="group" aria-label="Период">
+                    <button type="button" data-range="1h">1 ч</button>
+                    <button type="button" data-range="24h">24 ч</button>
+                    <button type="button" data-range="7d">7 дн</button>
+                </div>
+            </div>
 
             <div class="stats-grid" id="stats-container"></div>
 
-            <h2 style="font-size: 18px; margin-bottom: 15px;">Детализация по активным ловушкам</h2>
-            <div class="traps-list" id="traps-detail-container"></div>
+            <div class="chart-card">
+                <div class="chart-head">
+                    <h2>Активность</h2>
+                    <div class="chart-legend">
+                        <span><i class="key key-attack"></i>Атаки</span>
+                        <span><i class="key key-other"></i>Прочие события</span>
+                    </div>
+                </div>
+                <p class="chart-sub">Атаки — попытки входа, сканирования и срабатывания honeytoken.</p>
+                <div class="activity-chart" id="dash-activity"></div>
+                <details class="chart-table">
+                    <summary>Показать таблицей</summary>
+                    <div id="dash-activity-table"></div>
+                </details>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Самые активные IP</h2><div class="chart-legend"><span><i class="key key-attack"></i>Атаки</span><span><i class="key key-other"></i>Прочие события</span></div></div>
+                    <p class="chart-sub">Атаки и прочие события с одного адреса.</p>
+                    <div class="hbars" id="dash-sources"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Ловушки</h2><div class="chart-legend"><span><i class="key key-attack"></i>Атаки</span><span><i class="key key-other"></i>Прочие события</span></div></div>
+                    <p class="chart-sub">Нажмите на ловушку, чтобы открыть её события.</p>
+                    <div class="hbars" id="dash-traps"></div>
+                </div>
+            </div>
+
+            <div class="charts-grid charts-grid-3">
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Типы событий</h2><div class="chart-legend"><span><i class="key key-attack"></i>Атаки</span><span><i class="key key-other"></i>Прочие события</span></div></div>
+                    <div class="hbars" id="dash-types"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Частые логины</h2></div>
+                    <div class="hbars" id="dash-usernames"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><h2>Частые пароли</h2></div>
+                    <div class="hbars" id="dash-passwords"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ВКЛАДКА: СВОИ ЛОВУШКИ (ПЛАГИНЫ) -->
+        <section id="plugins" class="tab-content">
+            <div class="traps-header">
+                <h1>Свои ловушки</h1>
+                <div class="traps-actions">
+                    <a class="btn btn-secondary" href="/api/plugin-templates/service" download>Шаблон: service</a>
+                    <a class="btn btn-secondary" href="/api/plugin-templates/stdio" download>Шаблон: stdio</a>
+                    <button class="btn" id="plugin-upload-btn">Загрузить проект</button>
+                    <input type="file" id="plugin-file" accept=".zip,.tar.gz,.tgz,.tar" hidden>
+                </div>
+            </div>
+            <p class="field-help page-help">Свой проект становится классом ловушки: его можно выбрать при создании ловушки и развернуть на любом хосте. Агент запускает программу, следит за ней и пересылает её события в центр.</p>
+
+            <div id="plugin-upload-status" class="plugin-status" hidden></div>
+
+            <div class="plugin-list" id="plugins-list-container"></div>
+
+            <details class="plugin-guide">
+                <summary>Как подготовить проект</summary>
+                <div class="plugin-guide-body">
+                    <p>Архив <code>.zip</code> или <code>.tar.gz</code> с файлом <code>honeyforge-plugin.json</code> в корне (или в единственной папке архива). Проще всего скачать шаблон и поменять в нём код.</p>
+                    <pre class="code-block">{
+  "name": "my-ftp",
+  "title": "Мой FTP",
+  "version": "1.0.0",
+  "mode": "service",
+  "command": ["python3", "server.py"],
+  "default_port": 2121,
+  "requires": ["python3"],
+  "params": [
+    {"key": "banner", "title": "Баннер", "type": "string", "default": "220 ready"}
+  ]
+}</pre>
+                    <table class="plain-table">
+                        <tr><th>name</th><td>латиница, цифры, <code>-</code> и <code>_</code>; класс ловушки будет <code>plugin:name</code></td></tr>
+                        <tr><th>mode</th><td><code>service</code> — программа сама слушает порт из <code>HF_PORT</code> на адресе <code>HF_BIND</code>. <code>stdio</code> — порт слушает агент и на каждое подключение запускает программу: stdin и stdout — это клиент.</td></tr>
+                        <tr><th>command</th><td>как запустить программу; путь с <code>/</code> считается внутри архива (<code>./run.sh</code>)</td></tr>
+                        <tr><th>requires</th><td>программы, которые должны быть на хосте; деплой проверит их до установки</td></tr>
+                        <tr><th>params</th><td>поля формы ловушки, как у встроенных классов: <code>string</code>, <code>text</code>, <code>int</code>, <code>number</code>, <code>bool</code>, <code>enum</code>, <code>list</code>. Значения приходят программе в <code>HF_PARAMS</code> (JSON).</td></tr>
+                    </table>
+                    <p>Событие — одна строка JSON с полем <code>type</code>. В режиме service её можно печатать в stdout или stderr, в режиме stdio — только в stderr. Остальной вывод попадает в журнал агента.</p>
+                    <pre class="code-block">{"type": "auth", "src_ip": "203.0.113.5", "src_port": 51234, "username": "root", "password": "123456"}
+{"type": "command", "data": {"line": "uname -a"}}</pre>
+                    <p>Типы: <code>connect</code>, <code>disconnect</code>, <code>data</code>, <code>auth</code>, <code>command</code>, <code>request</code>, <code>handshake</code>, <code>scan</code>, <code>token</code>, <code>error</code>. В режиме stdio адрес клиента и сессию агент подставит сам. Каталог для записи — <code>HF_DATA_DIR</code>; программа работает от пользователя <code>nobody</code>.</p>
+                </div>
+            </details>
         </section>
 
         <!-- ВКЛАДКА 3: СОБЫТИЯ -->
@@ -83,6 +219,18 @@
             <div class="events-toolbar">
                 <label for="events-trap-select">Ловушка:</label>
                 <select id="events-trap-select" class="form-select"></select>
+                <label for="events-type-select">Тип:</label>
+                <select id="events-type-select" class="form-select">
+                    <option value="">Все</option>
+                    <option value="connect">Подключение</option>
+                    <option value="auth">Вход</option>
+                    <option value="command">Команда</option>
+                    <option value="request">HTTP-запрос</option>
+                    <option value="scan">Сканирование</option>
+                    <option value="token">Honeytoken</option>
+                    <option value="data">Данные</option>
+                    <option value="handshake">Рукопожатие</option>
+                </select>
             </div>
 
             <div id="events-list" class="events-list"></div>
@@ -91,41 +239,186 @@
 
     <!-- МОДАЛЬНОЕ ОКНО СОЗДАНИЯ / РЕДАКТИРОВАНИЯ ЛОВУШКИ -->
     <div id="create-trap-modal" class="modal-overlay">
-        <div class="modal-content">
-            <span class="close-btn" data-close-modal="create-trap-modal">&times;</span>
-            <h2 id="trap-modal-title">Создание новой ловушки</h2>
+        <div class="modal-content modal-wide trap-modal">
+            <div class="modal-header">
+                <h2 id="trap-modal-title">Создание новой ловушки</h2>
+                <span class="close-btn" data-close-modal="create-trap-modal">&times;</span>
+            </div>
 
             <form id="create-trap-form">
-                <div class="form-group">
-                    <label>Название ловушки</label>
-                    <input type="text" id="trap-name" required placeholder="Например: SSH Honeypot">
+                <div class="modal-body">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="trap-name">Название ловушки</label>
+                            <input type="text" id="trap-name" required placeholder="Например: SSH Honeypot">
+                        </div>
+                        <div class="form-group">
+                            <label for="trap-host">Хост</label>
+                            <select id="trap-host" class="form-select"></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="trap-class">Класс ловушки</label>
+                            <select id="trap-class" class="form-select" required></select>
+                        </div>
+                        <div class="form-group" id="trap-preset-group">
+                            <label for="trap-preset">Шаблон (необязательно)</label>
+                            <select id="trap-preset" class="form-select">
+                                <option value="">— Без шаблона —</option>
+                            </select>
+                        </div>
+                        <p class="field-help span-all" id="trap-class-help"></p>
+                        <div class="form-group">
+                            <label for="trap-bind">Адрес (bind)</label>
+                            <input type="text" id="trap-bind" value="0.0.0.0" placeholder="0.0.0.0">
+                        </div>
+                        <div class="form-group" id="trap-port-group">
+                            <label for="trap-port">Порт</label>
+                            <input type="number" id="trap-port" min="1" max="65535" placeholder="2222">
+                        </div>
+                        <div class="form-group" id="trap-ports-group" style="display:none;">
+                            <label for="trap-ports">Порты (через запятую, диапазоны через дефис)</label>
+                            <input type="text" id="trap-ports" placeholder="9000-9003,10443">
+                        </div>
+                        <p class="field-help span-all">Агент хоста запускает все его включённые ловушки, поэтому их порты не должны совпадать.</p>
+                    </div>
+
+                    <div class="form-section-head">
+                        <h3>Параметры ловушки</h3>
+                        <button type="button" class="btn btn-secondary btn-small" id="params-mode-btn">Редактировать как JSON</button>
+                    </div>
+                    <div id="params-form" class="params-form"></div>
+                    <textarea id="trap-params" class="code-input" rows="20" spellcheck="false" hidden></textarea>
                 </div>
 
-                <div class="form-group">
-                    <label>Тип ловушки</label>
-                    <select id="trap-type" class="form-select" required>
-                        <option value="SSH">SSH</option>
-                        <option value="Web">Web</option>
-                        <option value="FTP">FTP</option>
-                        <option value="RDP">RDP</option>
-                    </select>
+                <div class="modal-footer">
+                    <div id="trap-form-error" class="auth-error-message" hidden></div>
+                    <div class="modal-footer-row">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="trap-active" checked>
+                            <label for="trap-active">Запущена (агент должен работать)</label>
+                        </div>
+                        <div class="modal-footer-actions">
+                            <button type="button" class="btn btn-secondary" data-close-modal="create-trap-modal">Отмена</button>
+                            <button type="submit" class="btn btn-success">Сохранить</button>
+                        </div>
+                    </div>
                 </div>
-
-                <div class="form-group">
-                    <label>IP-адрес или URL</label>
-                    <input type="text" id="trap-target" required placeholder="192.168.1.10:22 или http://10.0.0.5/">
-                </div>
-
-                <div class="form-group checkbox-group">
-                    <input type="checkbox" id="trap-active" checked>
-                    <label for="trap-active">Активна</label>
-                </div>
-
-                <button type="submit" class="btn btn-success full-width">Сохранить</button>
             </form>
         </div>
     </div>
 
+    <!-- МОДАЛЬНОЕ ОКНО «ЛОВУШКА СОЗДАНА» -->
+    <div id="trap-created-modal" class="modal-overlay">
+        <div class="modal-content">
+            <span class="close-btn" data-close-modal="trap-created-modal">&times;</span>
+            <h2>Ловушка создана</h2>
+
+            <!-- Ловушка на хосте: заработает после применения изменений -->
+            <div id="created-hosted">
+                <p class="field-help" id="created-hosted-text"></p>
+                <div class="traps-actions">
+                    <button type="button" id="created-apply-btn" class="btn btn-success">Применить на сервере</button>
+                    <button type="button" class="btn btn-secondary" data-close-modal="trap-created-modal">Позже</button>
+                </div>
+            </div>
+
+            <!-- Ловушка без хоста: запуск агента вручную -->
+            <div id="created-loose">
+                <p class="field-help">Ловушка не привязана к хосту. Запустите агента вручную или привяжите ловушку к хосту, чтобы центр сам разворачивал её по SSH.</p>
+
+                <ol class="run-steps">
+                    <li>Соберите агент один раз: <code>cd agent &amp;&amp; cargo build --release</code></li>
+                    <li>Скачайте конфиг и положите рядом с бинарником.</li>
+                    <li>Запустите: <code>./honeyforge-agent config.json</code></li>
+                </ol>
+
+                <div class="form-group">
+                    <label>Токен ловушки</label>
+                    <input type="text" id="created-token" readonly>
+                </div>
+
+                <div class="traps-actions">
+                    <a id="download-config-btn" class="btn btn-success" href="#" download>Скачать config.json</a>
+                    <a id="download-bundle-btn" class="btn btn-secondary" href="#" download>Скачать .zip (конфиг, проект и инструкция)</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- МОДАЛЬНОЕ ОКНО ХОСТА: адрес и SSH-доступ -->
+    <div id="host-modal" class="modal-overlay">
+        <div class="modal-content modal-wide">
+            <span class="close-btn" data-close-modal="host-modal">&times;</span>
+            <h2 id="host-modal-title">Новый хост</h2>
+            <p class="field-help">Доступ по SSH центр хранит зашифрованным и в браузер не возвращает. По нему он ставит, обновляет и снимает агента хоста.</p>
+
+            <form id="host-form" autocomplete="off">
+                <div class="form-group">
+                    <label for="host-name">Название <span style="color: var(--color-danger);">*</span></label>
+                    <input type="text" id="host-name" required maxlength="255" placeholder="Например: web-01 (DMZ)">
+                </div>
+
+                <div style="display: flex; gap: 15px;">
+                    <div class="form-group" style="flex: 3;">
+                        <label for="host-address">Адрес сервера <span style="color: var(--color-danger);">*</span></label>
+                        <input type="text" id="host-address" required placeholder="Например: 192.168.1.50 или honeypot.internal">
+                    </div>
+                    <div class="form-group" style="flex: 1;">
+                        <label for="host-port">SSH Порт</label>
+                        <input type="number" id="host-port" value="22" min="1" max="65535" placeholder="22">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="host-username">Имя пользователя SSH <span style="color: var(--color-danger);">*</span></label>
+                    <input type="text" id="host-username" required value="root" placeholder="root">
+                </div>
+
+                <div class="form-group">
+                    <label>Способ аутентификации</label>
+                    <div style="display: flex; gap: 20px; margin: 8px 0;">
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                            <input type="radio" name="host-auth-type" value="password" checked id="host-auth-password-radio">
+                            <span>Пароль SSH</span>
+                        </label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                            <input type="radio" name="host-auth-type" value="key" id="host-auth-key-radio">
+                            <span>Приватный SSH-ключ</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-group" id="host-password-group">
+                    <label for="host-password">Пароль SSH</label>
+                    <input type="password" id="host-password" autocomplete="new-password" placeholder="Введите пароль пользователя SSH">
+                </div>
+
+                <div class="form-group" id="host-key-group" style="display: none;">
+                    <label for="host-key">Приватный ключ SSH (OpenSSH / PEM, без пароля)</label>
+                    <textarea id="host-key" class="code-input" rows="5" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <input type="checkbox" id="host-use-sudo">
+                    <label for="host-use-sudo">Использовать sudo (если подключаетесь не под root)</label>
+                </div>
+
+                <div class="form-group" id="host-sudo-password-group" style="display: none;">
+                    <label for="host-sudo-password">Пароль sudo (если отличается от пароля SSH)</label>
+                    <input type="password" id="host-sudo-password" autocomplete="new-password" placeholder="Оставьте пустым, если совпадает с паролем SSH">
+                </div>
+
+                <div id="host-form-error" class="auth-error-message" hidden></div>
+
+                <div class="traps-actions" style="margin-top: 20px; justify-content: flex-end;">
+                    <button type="button" class="btn btn-secondary" data-close-modal="host-modal">Отмена</button>
+                    <button type="submit" class="btn btn-success" id="host-submit-btn">Сохранить</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="chart-tooltip" id="chart-tooltip" hidden></div>
     <script src="script.js"></script>
 </body>
 </html>

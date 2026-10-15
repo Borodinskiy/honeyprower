@@ -1,8 +1,11 @@
 package main
 
+// Начало начал
+
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -16,61 +19,102 @@ import (
 
 	"honeyprower/internal/auth"
 	"honeyprower/internal/config"
+	"honeyprower/internal/demo"
+	"honeyprower/internal/deploy"
 	"honeyprower/internal/handlers"
+	"honeyprower/internal/middleware"
 	"honeyprower/internal/router"
+	"honeyprower/internal/secret"
 	"honeyprower/internal/storage"
 )
 
 func main() {
-	cfg := config.Load()
+	honeycfg := config.Load()
 
 	// ---------- Database ----------
-	store, err := storage.NewPostgres(context.Background(), cfg.DBDSN)
+	var dbStorage storage.Storage
+	// Сюда попадает функция для закрытия базы данных
+	var closeStore func() error
+	pgDatabase, err := storage.NewPostgres(context.Background(), honeycfg.DBDSN)
 	if err != nil {
-		log.Fatalf("failed to initialize postgres storage: %v", err)
+		log.Printf("failed to initialize postgres storage (%v)", err)
+		if !honeycfg.FallbackInMemory {
+			log.Fatal("Ending operation")
+			os.Exit(1)
+		}
+		// В случае ошибки открытия postgres все данные хранятся в оперативной памяти
+		log.Printf("falling back to in-memory store")
+		memDatabase := storage.NewInMemory()
+		// Заполнение тестовыми данными
+		storage.Seed(memDatabase)
+		dbStorage = memDatabase
+	} else {
+		dbStorage = pgDatabase
+		closeStore = pgDatabase.Close
 	}
-	defer store.Close()
 
 	authMgr := auth.NewManager()
-	h := handlers.New(store, authMgr)
+	handlers := handlers.New(dbStorage, authMgr)
+	handlers.Deployer = deploy.NewSSHDeployer()
+	handlers.AllowRegistration = honeycfg.AllowRegistration
+	handlers.PublicURL = honeycfg.PublicURL
+	box, err := loadSecretBox(honeycfg)
+	if err != nil {
+		log.Fatalf("secret key: %v", err)
+	}
+	handlers.Secrets = box
+	if !honeycfg.AllowRegistration {
+		log.Println("WARN: self-registration is disabled in configuration")
+	}
 
 	// ---------- API server ----------
 	apiSrv := &http.Server{
-		Addr:         cfg.APIAddr,
-		Handler:      router.NewAPI(h, authMgr),
+		Addr:         honeycfg.APIAddr,
+		Handler:      router.NewAPI(handlers, authMgr),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
 	// ---------- Web server ----------
-	apiURL, _ := url.Parse("http://" + cfg.APIAddr)
+	apiURL, _ := url.Parse("http://" + honeycfg.APIAddr)
 	proxy := httputil.NewSingleHostReverseProxy(apiURL)
 
-	webMux := NewWebMux(cfg, authMgr, proxy)
+	webMux := NewWebMux(honeycfg, authMgr, proxy)
 
 	webSrv := &http.Server{
-		Addr:         cfg.WebAddr,
+		Addr:         honeycfg.WebAddr,
 		Handler:      webMux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// ---------- demo traffic ----------
+	// С DEMO_DATA центр сам генерирует атаки для показа; без него убирает оставшиеся демо-события.
+	demoCtx, stopDemo := context.WithCancel(context.Background())
+	defer stopDemo()
+	if honeycfg.DemoData {
+		log.Println("WARN: DEMO_DATA is on — generating fake attack events")
+		go demo.Run(demoCtx, dbStorage)
+	} else {
+		go demo.Clear(demoCtx, dbStorage)
+	}
+
 	// ---------- run ----------
 	// Отслеживание цепочки ошибок в проверках ниже
 	errCh := make(chan error, 2)
 
-	// Ебанина, которая умом проверяет ошибки и записывает их в errCh
+	// Ошибки запуска серверов попадают в errCh.
 	// http.ErrServerClosed значит, что сервер был выключен вручную, по сути не ошибка запуска, поэтому скип
 	go func() {
-		log.Printf("web server  → http://%s   (static dir: %s)", cfg.WebAddr, cfg.StaticDir)
+		log.Printf("web server  → http://%s   (static dir: %s)", honeycfg.WebAddr, honeycfg.StaticDir)
 		if err := webSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
 	go func() {
-		log.Printf("api server  → http://%s", cfg.APIAddr)
+		log.Printf("api server  → http://%s", honeycfg.APIAddr)
 		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -81,18 +125,45 @@ func main() {
 	// Отслеживание сигнала остановки сервера в виде Ctrl+C
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	exitCode := 0
 	select {
 	case err := <-errCh:
-		log.Fatalf("server error: %v", err)
+		// не log.Fatalf: иначе не отработают defer'ы и соединение с БД не закроется
+		log.Printf("server error: %v", err)
+		exitCode = 1
 	case sig := <-stop:
 		log.Printf("signal %s — shutting down", sig)
 	}
 
+	stopDemo()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	_ = webSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
+	cancel()
+	if closeStore != nil {
+		_ = closeStore()
+	}
 	log.Println("'Bye")
+	os.Exit(exitCode)
+}
+
+// loadSecretBox берёт ключ шифрования SSH-доступа к хостам: HF_SECRET_KEY или
+// файл ключа (создаётся при первом запуске). Без постоянного ключа сохранённые
+// пароли не пережили бы перезапуск, поэтому ошибка здесь фатальна.
+func loadSecretBox(cfg *config.Config) (*secret.Box, error) {
+	if cfg.SecretKey != "" {
+		key, err := secret.ParseKey(cfg.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("HF_SECRET_KEY: %w", err)
+		}
+		return secret.New(key)
+	}
+	key, err := secret.LoadOrCreateKeyFile(cfg.SecretKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("%w (set HF_SECRET_KEY or HF_SECRET_KEY_FILE to a writable path)", err)
+	}
+	log.Printf("host credentials key: %s", cfg.SecretKeyFile)
+	return secret.New(key)
 }
 
 // NewWebMux configures the web server router with authentication checks and route protection.
@@ -100,10 +171,23 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 	webMux := http.NewServeMux()
 	if proxy != nil {
 		webMux.Handle("/api/", proxy)
+		// Деплой и снятие по SSH идут дольше WriteTimeout веб-сервера — продлеваем срок только для них.
+		slowSSH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(4 * time.Minute))
+			proxy.ServeHTTP(w, r)
+		})
+		webMux.Handle("POST /api/traps/{id}/deploy", slowSSH)
+		webMux.Handle("POST /api/traps/{id}/undeploy", slowSSH)
+		webMux.Handle("POST /api/hosts/{id}/deploy", slowSSH)
+		webMux.Handle("POST /api/hosts/{id}/undeploy", slowSSH)
+		webMux.Handle("GET /api/hosts/{id}/status", slowSSH)
+		webMux.Handle("/cdn-cgi/rum", proxy)
+		webMux.Handle("/v1/rgstr", proxy)
+		webMux.Handle("/api/v2/metrics", proxy)
 	}
 
 	isAuthorized := func(r *http.Request) bool {
-		c, err := r.Cookie("session_token")
+		c, err := r.Cookie(middleware.SessionCookie)
 		if err != nil || c.Value == "" {
 			return false
 		}

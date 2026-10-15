@@ -1,0 +1,12 @@
+.git
+.vscode
+.agy-model-router
+build
+data
+tmp
+docs
+tasks
+ROMAN
+honeyprower
+*_test.go
+agent/target

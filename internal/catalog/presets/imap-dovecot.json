@@ -1,0 +1,64 @@
+{
+  "name": "IMAP (Dovecot)",
+  "class": "dialog",
+  "port": 1143,
+  "tags": [
+    "imap",
+    "mail",
+    "auth"
+  ],
+  "description": "IMAP: LOGIN user pass захват. Реальный порт 143.",
+  "params": {
+    "greeting": "* OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+ STARTTLS AUTH=PLAIN] Dovecot (Ubuntu) ready.\\r\\n",
+    "default_response": "* BAD Error in IMAP command received by server.\\r\\n",
+    "rules": [
+      {
+        "state": "*",
+        "match": "^(\\S+)\\s+LOGIN\\s+\"?(?P<user>[^\"\\s]+)\"?\\s+\"?(?P<pass>[^\"]*)\"?$",
+        "response": "{1} NO [AUTHENTICATIONFAILED] Authentication failed.\\r\\n",
+        "capture": "username_password",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^(\\S+)\\s+CAPABILITY",
+        "response": "* CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+ AUTH=PLAIN\\r\\n{1} OK Pre-login capabilities listed, post-login capabilities have more.\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^(\\S+)\\s+LOGOUT",
+        "response": "* BYE Logging out\\r\\n{1} OK Logout completed.\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": true,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^(\\S+)\\s+\\S+",
+        "response": "{1} BAD Error in IMAP command: Unknown command.\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      }
+    ]
+  },
+  "probe": [
+    "a1 CAPABILITY",
+    "a2 LOGIN admin 123456",
+    "a3 LOGOUT"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

@@ -9,10 +9,7 @@
 <body class="dark-theme login-page">
     <div class="login-wrapper">
         <div class="auth-card">
-            <div class="login-logo">
-                <span>🌐</span>
-                <span>HoneyForge</span>
-            </div>
+            <div class="login-logo">HoneyForge</div>
 
             <div id="auth-error" class="auth-error-message" style="display: none;"></div>
 
@@ -45,7 +42,7 @@
                     </div>
                     <div class="form-group">
                         <label>Пароль</label>
-                        <input type="password" name="password" required placeholder="Придумайте пароль" autocomplete="new-password">
+                        <input type="password" name="password" required minlength="6" maxlength="72" placeholder="Придумайте пароль" autocomplete="new-password">
                     </div>
                     <button type="submit" class="btn btn-success full-width">Зарегистрироваться</button>
                 </form>

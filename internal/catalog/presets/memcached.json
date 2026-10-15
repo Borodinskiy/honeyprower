@@ -1,0 +1,73 @@
+{
+  "name": "Memcached",
+  "class": "dialog",
+  "port": 11211,
+  "tags": [
+    "memcached",
+    "cache"
+  ],
+  "description": "Memcached text protocol: stats/version/get. Логирует команды.",
+  "params": {
+    "greeting": "",
+    "default_response": "ERROR\\r\\n",
+    "rules": [
+      {
+        "state": "*",
+        "match": "^version",
+        "response": "VERSION 1.6.21\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^stats",
+        "response": "STAT pid 1123\\r\\nSTAT uptime 864211\\r\\nSTAT version 1.6.21\\r\\nSTAT curr_connections 4\\r\\nEND\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^get\\s",
+        "response": "END\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^(set|add|replace)\\s",
+        "response": "STORED\\r\\n",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": false,
+        "log": true
+      },
+      {
+        "state": "*",
+        "match": "^quit",
+        "response": "",
+        "capture": "",
+        "decode": "",
+        "next_state": "",
+        "close": true,
+        "log": true
+      }
+    ]
+  },
+  "probe": [
+    "version",
+    "stats",
+    "quit"
+  ],
+  "bind": "0.0.0.0",
+  "level": "low"
+}

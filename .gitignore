@@ -3,3 +3,4 @@ data
 tmp
 honeyprower
 .agy-model-router/
+.env
