@@ -4,6 +4,7 @@ package router
 
 import (
 	"net/http"
+	"time"
 
 	"honeyprower/internal/auth"
 	"honeyprower/internal/handlers"
@@ -41,9 +42,9 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	mux.Handle("PATCH /api/hosts/{id}", requireAuth(http.HandlerFunc(handlers.UpdateHost)))
 	mux.Handle("DELETE /api/hosts/{id}", requireAuth(http.HandlerFunc(handlers.DeleteHost)))
 	mux.Handle("GET /api/hosts/{id}/config", requireAuth(http.HandlerFunc(handlers.HostConfig)))
-	mux.Handle("GET /api/hosts/{id}/status", requireAuth(http.HandlerFunc(handlers.HostStatus)))
-	mux.Handle("POST /api/hosts/{id}/deploy", requireAuth(http.HandlerFunc(handlers.DeployHost)))
-	mux.Handle("POST /api/hosts/{id}/undeploy", requireAuth(http.HandlerFunc(handlers.UndeployHost)))
+	mux.Handle("GET /api/hosts/{id}/status", requireAuth(slow(handlers.HostStatus)))
+	mux.Handle("POST /api/hosts/{id}/deploy", requireAuth(slow(handlers.DeployHost)))
+	mux.Handle("POST /api/hosts/{id}/undeploy", requireAuth(slow(handlers.UndeployHost)))
 
 	mux.Handle("GET /api/traps", requireAuth(http.HandlerFunc(handlers.ListTraps)))
 	mux.Handle("POST /api/traps", requireAuth(http.HandlerFunc(handlers.CreateTrap)))
@@ -53,8 +54,8 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	mux.Handle("GET /api/traps/{id}/events", requireAuth(http.HandlerFunc(handlers.ListTrapEvents)))
 	mux.Handle("GET /api/traps/{id}/config", requireAuth(http.HandlerFunc(handlers.TrapConfig)))
 	mux.Handle("GET /api/traps/{id}/bundle", requireAuth(http.HandlerFunc(handlers.TrapBundle)))
-	mux.Handle("POST /api/traps/{id}/deploy", requireAuth(http.HandlerFunc(handlers.HandleDeployTrap)))
-	mux.Handle("POST /api/traps/{id}/undeploy", requireAuth(http.HandlerFunc(handlers.HandleUndeployTrap)))
+	mux.Handle("POST /api/traps/{id}/deploy", requireAuth(slow(handlers.HandleDeployTrap)))
+	mux.Handle("POST /api/traps/{id}/undeploy", requireAuth(slow(handlers.HandleUndeployTrap)))
 
 	mux.Handle("GET /api/plugins", requireAuth(http.HandlerFunc(handlers.ListPlugins)))
 	mux.Handle("POST /api/plugins", requireAuth(http.HandlerFunc(handlers.UploadPlugin)))
@@ -76,4 +77,17 @@ func NewAPI(handlers *handlers.Handlers, authMgr *auth.Manager) http.Handler {
 	cross.AddInsecureBypassPattern("/v1/rgstr")
 	cross.AddInsecureBypassPattern("/api/v2/metrics")
 	return middleware.Logging(cross.Handler(mux))
+}
+
+// SlowTimeout — сколько может идти развёртывание по SSH: установка пакетов на
+// хосте и загрузка Python-зависимостей занимают минуты, а WriteTimeout
+// серверов центра — 15 с.
+const SlowTimeout = 10 * time.Minute
+
+// slow продлевает срок записи ответа для долгих SSH-операций.
+func slow(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(SlowTimeout))
+		h(w, r)
+	})
 }

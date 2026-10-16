@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"crypto/ecdh"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -50,14 +49,24 @@ func Seed(s *Memory) {
 			Params: json.RawMessage(`{}`), Enabled: true}, "demo-high-shell-token"},
 	}
 	for _, d := range demo {
-		sha := sha256.Sum256([]byte(d.token))
-		d.in.KeyID = hex.EncodeToString(sha[:8])
-		if priv, err := ecdh.X25519().GenerateKey(rand.Reader); err == nil {
-			d.in.PubKey = hex.EncodeToString(priv.PublicKey().Bytes())
-			d.in.PrivKey = hex.EncodeToString(priv.Bytes())
-		}
+		d.in.KeyID, d.in.PubKey, d.in.PrivKey = DemoTrapKeys(d.token)
 		if _, err := s.CreateTrap(ctx, d.in, d.token); err != nil {
 			log.Printf("seed: trap: %v", err)
 		}
 	}
+}
+
+// DemoTrapKeys — постоянные ключи демо-ловушки, выведенные из её токена. Их
+// открытые ключи лежат в deploy/agent-configs, поэтому демо-агенты из
+// docker-compose шифруют события так, что центр их принимает. Те же значения
+// записаны в migrations/002_seed.sql. Настоящие ловушки получают случайные ключи.
+func DemoTrapKeys(token string) (keyID, pubHex, privHex string) {
+	sha := sha256.Sum256([]byte(token))
+	keyID = hex.EncodeToString(sha[:8])
+	seed := sha256.Sum256([]byte("honeyforge-demo-key:" + token))
+	priv, err := ecdh.X25519().NewPrivateKey(seed[:])
+	if err != nil {
+		panic(err) // X25519 принимает любые 32 байта
+	}
+	return keyID, hex.EncodeToString(priv.PublicKey().Bytes()), hex.EncodeToString(priv.Bytes())
 }

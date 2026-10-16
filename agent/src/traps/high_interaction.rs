@@ -637,7 +637,7 @@ impl ShellSession {
                 "payload_sample": sample,
             });
             s.emit_data(event_type::COMMAND, payload_data.clone());
-            s.emit_data("payload", payload_data);
+            s.emit_data(event_type::PAYLOAD, payload_data);
 
             return (String::new(), exit);
         }
@@ -767,7 +767,7 @@ impl ShellSession {
                         "payload_sample": sample,
                     });
                     s.emit_data(event_type::COMMAND, p_data.clone());
-                    s.emit_data("payload", p_data);
+                    s.emit_data(event_type::PAYLOAD, p_data);
                     payload_emitted = true;
                 }
                 String::new()
@@ -1609,7 +1609,7 @@ MiB Swap:   2048.0 total,   2048.0 free,      0.0 used.   2850.4 avail Mem \n\
                         "payload_sample": sample,
                     });
                     s.emit_data(event_type::COMMAND, p_data.clone());
-                    s.emit_data("payload", p_data);
+                    s.emit_data(event_type::PAYLOAD, p_data);
 
                     (String::from_utf8_lossy(&decoded).to_string(), true)
                 }

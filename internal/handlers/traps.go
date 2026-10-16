@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -81,6 +82,7 @@ func (h *Handlers) CreateTrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to create trap")
 		return
 	}
+	h.honeyCreds.reset()
 	httpx.WriteJSON(w, http.StatusCreated, trap)
 }
 
@@ -191,6 +193,7 @@ func (h *Handlers) UpdateTrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to update trap")
 		return
 	}
+	h.honeyCreds.reset()
 	httpx.WriteJSON(w, http.StatusOK, trap)
 }
 
@@ -208,6 +211,7 @@ func (h *Handlers) DeleteTrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to delete trap")
 		return
 	}
+	h.honeyCreds.reset()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -321,8 +325,8 @@ func prepareParams(class catalog.Class, params json.RawMessage, ports *string) (
 	return out, ""
 }
 
-// fillHoneytokens gives every link without an ID a random one: the agent can
-// only recognise a hit by a non-empty token.
+// fillHoneytokens дополняет приманки тем, что генерирует центр: ID ссылки
+// (агент узнаёт переход только по непустому ID) и пароль учётки.
 func fillHoneytokens(obj map[string]any) error {
 	tokens, _ := obj["tokens"].([]any)
 	for _, it := range tokens {
@@ -330,15 +334,23 @@ func fillHoneytokens(obj map[string]any) error {
 		if !ok {
 			continue
 		}
-		if s, _ := t["token"].(string); strings.TrimSpace(s) == "" {
-			b := make([]byte, 8)
+		if k, _ := t["kind"].(string); k == "" {
+			t["kind"] = "url"
+		}
+		field, size := "token", 8
+		if t["kind"] == "credentials" {
+			field, size = "password", 9
+		}
+		if s, _ := t[field].(string); strings.TrimSpace(s) == "" {
+			b := make([]byte, size)
 			if _, err := rand.Read(b); err != nil {
 				return err
 			}
-			t["token"] = hex.EncodeToString(b)
-		}
-		if _, ok := t["kind"]; !ok {
-			t["kind"] = "url"
+			if field == "password" {
+				t[field] = base64.RawURLEncoding.EncodeToString(b)
+			} else {
+				t[field] = hex.EncodeToString(b)
+			}
 		}
 	}
 	return nil

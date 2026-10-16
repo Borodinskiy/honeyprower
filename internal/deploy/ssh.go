@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"honeyprower/internal/pydeps"
 )
 
 var _ Deployer = (*SSHDeployer)(nil)
@@ -37,7 +39,16 @@ const removeCmd = "systemctl disable --now honeyforge-agent.service >/dev/null 2
 // ErrPluginRequirements: на хосте нет программ, без которых плагин не запустится.
 var ErrPluginRequirements = errors.New("plugin requirements not met on host")
 
+// ErrPluginPackages: не удалось поставить системные пакеты плагина (нет доступа к репозиториям и т.п.).
+var ErrPluginPackages = errors.New("failed to install plugin packages on host")
+
+// pydepsDir — каталог Python-зависимостей внутри каталога плагина; агент добавляет его в PYTHONPATH.
+const pydepsDir = ".hf-pydeps"
+
 // safeArg — имена команд и каталогов, которые подставляются в shell без кавычек.
+// pyModule — имя модуля Python, как его проверяет internal/plugin.
+var pyModule = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]{0,255}$`)
+
 var safeArg = regexp.MustCompile(`^[A-Za-z0-9._+/-]+$`)
 
 // saveGoodCmd remembers the agent that has just been verified (replacing the old copy atomically).
@@ -698,6 +709,7 @@ func (d *SSHDeployer) installPlugins(ctx context.Context, client *ssh.Client, ta
 		return nil
 	}
 	var requires []string
+	packages := map[string][]string{}
 	seen := map[string]bool{}
 	for _, p := range plugins {
 		if !safeArg.MatchString(p.Dir) || !strings.HasPrefix(p.Dir, pluginsRoot+"/") || strings.Contains(p.Dir, "..") {
@@ -712,19 +724,44 @@ func (d *SSHDeployer) installPlugins(ctx context.Context, client *ssh.Client, ta
 				requires = append(requires, r)
 			}
 		}
-	}
-	if len(requires) > 0 {
-		cmd := "missing=''; for c in " + strings.Join(requires, " ") + "; do command -v \"$c\" >/dev/null 2>&1 || missing=\"$missing $c\"; done; " +
-			"if [ -n \"$missing\" ]; then echo $missing >&2; exit 1; fi"
-		_, stderr, code, err := d.runCommandWithOutput(client, target, cmd)
-		if err != nil {
-			return fmt.Errorf("failed to check plugin requirements: %w", err)
+		for _, m := range p.PythonModules {
+			if !pyModule.MatchString(m) {
+				return fmt.Errorf("plugin %s: invalid python module %q", p.Name, m)
+			}
 		}
-		if code != 0 {
-			return fmt.Errorf("%w: %s", ErrPluginRequirements, strings.TrimSpace(stderr))
+		for mgr, pkgs := range p.Packages {
+			if _, ok := pkgInstall[mgr]; !ok {
+				return fmt.Errorf("plugin %s: invalid package manager %q", p.Name, mgr)
+			}
+			for _, name := range pkgs {
+				if !pkgName.MatchString(name) {
+					return fmt.Errorf("plugin %s: invalid package %q", p.Name, name)
+				}
+				if !seen[mgr+":"+name] {
+					seen[mgr+":"+name] = true
+					packages[mgr] = append(packages[mgr], name)
+				}
+			}
 		}
 	}
 
+	// 1. Системные пакеты — из репозиториев хоста, только недостающие.
+	if len(packages) > 0 {
+		if err := d.installPackages(client, target, packages); err != nil {
+			return err
+		}
+	}
+
+	// 2. Программы, без которых плагины не запустятся.
+	if len(requires) > 0 {
+		cmd := "missing=''; for c in " + strings.Join(requires, " ") + "; do command -v \"$c\" >/dev/null 2>&1 || missing=\"$missing $c\"; done; "
+		if err := d.checkMissing(client, target, cmd, "plugin requirements"); err != nil {
+			return err
+		}
+	}
+
+	// 3. Файлы плагинов и их Python-зависимости, собранные центром под платформу хоста.
+	var platform *pydeps.Platform
 	for _, p := range plugins {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -736,21 +773,64 @@ func (d *SSHDeployer) installPlugins(ctx context.Context, client *ssh.Client, ta
 		if code == 0 {
 			continue // эта версия уже на хосте
 		}
-		tmp := "/tmp/hf_plugin_" + strings.TrimPrefix(p.Dir, pluginsRoot+"/") + ".tgz"
+		base := strings.TrimPrefix(p.Dir, pluginsRoot+"/")
+		tmp := "/tmp/hf_plugin_" + base + ".tgz"
 		if err := d.uploadFile(client, tmp, p.Archive); err != nil {
 			return fmt.Errorf("failed to upload plugin %s: %w", p.Name, err)
+		}
+		deps := ""
+		if p.PyDeps != nil {
+			if platform == nil {
+				out, stderr, code, err := d.runCommandWithOutput(client, target, pydeps.ProbeCmd)
+				if err != nil || code != 0 {
+					return fmt.Errorf("plugin %s: failed to detect python platform on host: %v %s", p.Name, err, tail(stderr, 2))
+				}
+				pl, err := pydeps.ParseProbe(lastLine(out))
+				if err != nil {
+					return fmt.Errorf("plugin %s: %w", p.Name, err)
+				}
+				platform = &pl
+			}
+			archive, err := p.PyDeps(ctx, *platform)
+			if err != nil {
+				return fmt.Errorf("plugin %s: failed to prepare python dependencies for %s: %w", p.Name, platform, err)
+			}
+			deps = "/tmp/hf_pydeps_" + base + ".tgz"
+			if err := d.uploadFile(client, deps, archive); err != nil {
+				return fmt.Errorf("failed to upload python dependencies of plugin %s: %w", p.Name, err)
+			}
 		}
 		// Распаковка во временный каталог и переименование: недоделанная установка
 		// не выглядит готовой (.hf-complete появляется последним).
 		install := "mkdir -p " + pluginsRoot + " && rm -rf " + p.Dir + ".tmp && mkdir -p " + p.Dir + ".tmp && " +
-			"tar -xzf " + tmp + " -C " + p.Dir + ".tmp --no-same-owner && " +
-			"chmod -R u+rwX,go+rX,go-w " + p.Dir + ".tmp && touch " + p.Dir + ".tmp/.hf-complete && " +
+			"tar -xzf " + tmp + " -C " + p.Dir + ".tmp --no-same-owner && "
+		if deps != "" {
+			install += "mkdir -p " + p.Dir + ".tmp/" + pydepsDir + " && tar -xzf " + deps + " -C " + p.Dir + ".tmp/" + pydepsDir +
+				" --no-same-owner && rm -f " + deps + " && "
+		}
+		install += "chmod -R u+rwX,go+rX,go-w " + p.Dir + ".tmp && touch " + p.Dir + ".tmp/.hf-complete && " +
 			"rm -rf " + p.Dir + " && mv " + p.Dir + ".tmp " + p.Dir + " && rm -f " + tmp + "; " +
 			"r=$?; if command -v restorecon >/dev/null 2>&1; then restorecon -RF " + p.Dir + " >/dev/null 2>&1; fi; exit $r"
 		if err := d.runCommand(client, target, install); err != nil {
 			return fmt.Errorf("failed to install plugin %s: %w", p.Name, err)
 		}
 	}
+
+	// 4. Модули Python — так, как их увидит плагин: со своими зависимостями и без
+	// пользовательских site-packages того, кто подключился (плагин работает от nobody).
+	modCheck := ""
+	for _, p := range plugins {
+		for _, m := range p.PythonModules {
+			modCheck += "PYTHONPATH=" + p.Dir + "/" + pydepsDir + " HOME=/nonexistent python3 -s -c \"import " + m +
+				"\" >/dev/null 2>&1 || missing=\"$missing python3:" + m + "\"; "
+		}
+	}
+	if modCheck != "" {
+		if err := d.checkMissing(client, target, "missing=''; "+modCheck, "python modules"); err != nil {
+			return err
+		}
+	}
+
 	// Агент работает как nobody: каталог, куда его программы могут писать.
 	dataCmd := "mkdir -p " + pluginDataDir + " && chown nobody " + pluginDataDir + " && chmod 0750 " + pluginDataDir
 	if err := d.runCommand(client, target, dataCmd); err != nil {
@@ -758,6 +838,98 @@ func (d *SSHDeployer) installPlugins(ctx context.Context, client *ssh.Client, ta
 	}
 	return nil
 }
+
+// checkMissing выполняет проверку, которая собирает недостающее в $missing.
+// Список — в stdout с меткой: в stderr sudo пишет своё (например, «лекцию» при первом запуске).
+func (d *SSHDeployer) checkMissing(client *ssh.Client, target TargetConfig, cmd, what string) error {
+	cmd += "if [ -n \"$missing\" ]; then echo \"hf-missing:$missing\"; exit 1; fi"
+	stdout, stderr, code, err := d.runCommandWithOutput(client, target, cmd)
+	if err != nil {
+		return fmt.Errorf("failed to check %s: %w", what, err)
+	}
+	if code != 0 {
+		for _, line := range strings.Split(stdout, "\n") {
+			if missing, ok := strings.CutPrefix(strings.TrimSpace(line), "hf-missing:"); ok {
+				return fmt.Errorf("%w: %s", ErrPluginRequirements, strings.TrimSpace(missing))
+			}
+		}
+		return fmt.Errorf("failed to check %s: %s", what, tail(stderr, 3))
+	}
+	return nil
+}
+
+// Как проверить и поставить пакеты каждым менеджером. apt сначала пробует без
+// update — не трогаем индексы, если пакеты и так известны.
+var pkgInstall = map[string]struct{ check, install string }{
+	"apt": {`dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'ok installed'`,
+		`export DEBIAN_FRONTEND=noninteractive; apt-get install -y -q --no-install-recommends $todo || { apt-get update -q && apt-get install -y -q --no-install-recommends $todo; }`},
+	"dnf":    {`rpm -q "$p" >/dev/null 2>&1`, `dnf install -y -q $todo`},
+	"yum":    {`rpm -q "$p" >/dev/null 2>&1`, `yum install -y -q $todo`},
+	"apk":    {`apk info -e "$p" >/dev/null 2>&1`, `apk add --no-cache -q $todo`},
+	"zypper": {`rpm -q "$p" >/dev/null 2>&1`, `zypper -n -q install $todo`},
+}
+
+// Команда менеджера пакетов → его имя в манифесте.
+var pkgManagers = [][2]string{{"apt-get", "apt"}, {"dnf", "dnf"}, {"yum", "yum"}, {"apk", "apk"}, {"zypper", "zypper"}}
+
+var pkgName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_:-]{0,127}$`)
+
+// installPackages ставит системные пакеты плагинов менеджером хоста. Нет
+// менеджера или пакетов для него — ничего не делаем: чего не хватает, скажет
+// проверка requires.
+func (d *SSHDeployer) installPackages(client *ssh.Client, target TargetConfig, packages map[string][]string) error {
+	detect := ""
+	for _, m := range pkgManagers {
+		detect += "command -v " + m[0] + " >/dev/null 2>&1 && { echo hf-pm:" + m[1] + "; exit 0; }; "
+	}
+	out, _, _, err := d.runCommandWithOutput(client, target, detect+"echo hf-pm:none")
+	if err != nil {
+		return fmt.Errorf("failed to detect package manager: %w", err)
+	}
+	mgr := ""
+	for _, line := range strings.Split(out, "\n") {
+		if m, ok := strings.CutPrefix(strings.TrimSpace(line), "hf-pm:"); ok {
+			mgr = m
+		}
+	}
+	pkgs := packages[mgr]
+	if len(pkgs) == 0 {
+		return nil
+	}
+	spec := pkgInstall[mgr]
+	cmd := "todo=''; for p in " + strings.Join(pkgs, " ") + "; do " + spec.check + " || todo=\"$todo $p\"; done; " +
+		"[ -z \"$todo\" ] && exit 0; echo \"hf-installing:$todo\"; " + spec.install
+	stdout, stderr, code, err := d.runCommandWithOutput(client, target, cmd)
+	if err != nil {
+		return fmt.Errorf("%w (%s): %v", ErrPluginPackages, mgr, err)
+	}
+	if code != 0 {
+		todo := ""
+		for _, line := range strings.Split(stdout, "\n") {
+			if t, ok := strings.CutPrefix(strings.TrimSpace(line), "hf-installing:"); ok {
+				todo = strings.TrimSpace(t)
+			}
+		}
+		return fmt.Errorf("%w (%s: %s): %s", ErrPluginPackages, mgr, todo, tail(stderr, 3))
+	}
+	return nil
+}
+
+// tail — последние n непустых строк одной строкой: для сообщений об ошибках.
+func tail(s string, n int) string {
+	var lines []string
+	for _, l := range strings.Split(s, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " | ")
+}
+
+func lastLine(s string) string { return tail(s, 1) }
 
 // prunePluginsCmd удаляет с хоста версии плагинов, которые не нужны текущему конфигу.
 func prunePluginsCmd(plugins []PluginFiles) string {

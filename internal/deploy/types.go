@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+
+	"honeyprower/internal/pydeps"
 )
 
 // ErrAgentStopped: an update failed and the agent on the host is now stopped (there was no
@@ -75,6 +77,12 @@ type PluginFiles struct {
 	Dir      string // абсолютный, например /opt/honeyforge/plugins/my-ftp-0123456789ab
 	Archive  []byte
 	Requires []string // команды, которые должны быть на хосте
+	// PythonModules — модули, которые python3 на хосте должен импортировать.
+	PythonModules []string
+	// Packages — системные пакеты по менеджерам (apt, dnf, yum, apk, zypper).
+	Packages map[string][]string
+	// PyDeps собирает Python-зависимости (pip) под платформу хоста; nil — их нет.
+	PyDeps func(ctx context.Context, p pydeps.Platform) ([]byte, error)
 }
 
 // ServiceStatus describes the runtime status of the remote agent service.

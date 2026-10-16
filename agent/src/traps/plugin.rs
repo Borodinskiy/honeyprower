@@ -40,7 +40,10 @@ const MAX_DATA: usize = 16 * 1024;
 /// Сколько последних строк журнала программы хранить для сообщения о падении.
 const TAIL_LINES: usize = 20;
 
-const EVENT_TYPES: [&str; 10] = [
+/// Каталог Python-зависимостей внутри каталога плагина (кладёт центр при деплое).
+pub const PYDEPS_DIR: &str = ".hf-pydeps";
+
+const EVENT_TYPES: [&str; 11] = [
     event_type::CONNECT,
     event_type::DISCONNECT,
     event_type::DATA,
@@ -51,6 +54,7 @@ const EVENT_TYPES: [&str; 10] = [
     event_type::SCAN,
     event_type::TOKEN,
     event_type::ERROR,
+    event_type::PAYLOAD,
 ];
 
 pub struct PluginTrap {
@@ -136,6 +140,16 @@ impl PluginTrap {
             // Своя группа процессов: при остановке убиваем и потомков (обёртка sh → python).
             .process_group(0)
             .kill_on_drop(true);
+        // Python-зависимости, которые центр привёз под платформу хоста (manifest.pip).
+        let deps = Path::new(&self.spec.dir).join(PYDEPS_DIR);
+        if deps.is_dir() {
+            let mut path = deps.into_os_string();
+            if let Some(old) = std::env::var_os("PYTHONPATH").filter(|v| !v.is_empty()) {
+                path.push(":");
+                path.push(old);
+            }
+            cmd.env("PYTHONPATH", path);
+        }
         cmd
     }
 
@@ -164,7 +178,7 @@ impl PluginTrap {
         loop {
             let started = Instant::now();
             let tail = Arc::new(Mutex::new(VecDeque::new()));
-            let mut child = match self.command().spawn() {
+            let mut child = match spawn_retrying(&mut self.command()).await {
                 Ok(c) => c,
                 Err(e) => {
                     let msg = format!("{}: не удалось запустить {}: {e}", self.label(), self.program.display());
@@ -296,7 +310,7 @@ impl PluginTrap {
             .env("HF_SRC_PORT", s.src_port.to_string())
             .env("HF_DST_PORT", s.dst_port.to_string())
             .env("HF_SESSION", &s.id);
-        let mut child = match cmd.spawn() {
+        let mut child = match spawn_retrying(&mut cmd).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("{}: не удалось запустить {}: {e}", self.label(), self.program.display());
@@ -395,6 +409,22 @@ impl Drop for GroupKill {
 }
 
 /// Команда с "/" — путь внутри каталога плагина (или абсолютный), без — ищется в PATH.
+/// Запуск с повтором при ETXTBSY: если в момент запуска другой поток агента
+/// порождал процесс, тот мог ненадолго унаследовать открытый на запись
+/// дескриптор файла программы, и exec отказывает «Text file busy».
+async fn spawn_retrying(cmd: &mut Command) -> std::io::Result<tokio::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 5 => {
+                attempt += 1;
+                sleep(Duration::from_millis(20 * attempt)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 fn resolve_program(dir: &Path, first: &str) -> PathBuf {
     let p = Path::new(first);
     if p.is_absolute() || !first.contains('/') {

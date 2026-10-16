@@ -10,6 +10,7 @@ import (
 
 	"honeyprower/internal/auth"
 	"honeyprower/internal/deploy"
+	"honeyprower/internal/pydeps"
 	"honeyprower/internal/secret"
 	"honeyprower/internal/storage"
 )
@@ -21,12 +22,22 @@ type Handlers struct {
 	AllowRegistration bool
 	// PublicURL — внешний адрес центра для агентов (в config.json). Пусто — берётся из запроса.
 	PublicURL string
+	// AgentTransport — как агенты шлют события: http_nolinger (по умолчанию) или udp_burst.
+	AgentTransport string
+	// CenterUDP — адрес UDP-приёмника центра для udp_burst, как его видят агенты
+	// ("host:port"; пустой host — хост из адреса центра).
+	CenterUDP string
 	Deployer  deploy.Deployer
 	// Secrets шифрует SSH-пароли и ключи хостов в базе.
 	Secrets *secret.Box
 
 	// hostOps не даёт запустить два деплоя/снятия одного хоста одновременно.
 	hostOps sync.Map // host id -> *sync.Mutex
+	// PyDeps собирает Python-зависимости своих ловушек под платформу хоста (pip центра, кэш).
+	PyDeps *pydeps.Builder
+
+	// honeyCreds — учётки-приманки ловушек honeytoken для сверки входов.
+	honeyCreds credCache
 }
 
 // Создаёт структуру обработчиков, передавая ей доступ к базе данных и менеджеру авторизации
@@ -39,6 +50,7 @@ func New(dbStorage storage.Storage, authMgr *auth.Manager) *Handlers {
 		AllowRegistration: true,
 		Deployer:          deploy.NewSSHDeployer(),
 		Secrets:           ephemeralBox(),
+		PyDeps:            &pydeps.Builder{},
 	}
 }
 
@@ -52,4 +64,14 @@ func ephemeralBox() *secret.Box {
 		panic(err)
 	}
 	return b
+}
+
+// defaultPyDeps — для Handlers, собранных без New (тесты): python3 центра, без кэша.
+var defaultPyDeps = &pydeps.Builder{}
+
+func (h *Handlers) pyDeps() *pydeps.Builder {
+	if h.PyDeps == nil {
+		return defaultPyDeps
+	}
+	return h.PyDeps
 }

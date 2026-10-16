@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -36,14 +37,29 @@ type Manifest struct {
 	DefaultPort int `json:"default_port,omitempty"`
 	// Requires — команды, которые должны быть на хосте (python3, node...): деплой проверит заранее.
 	Requires []string `json:"requires,omitempty"`
+	// PythonModules — модули Python, которые программа импортирует (paramiko...):
+	// деплой проверит, что python3 на хосте их находит. python3 добавляется в Requires сам.
+	PythonModules []string `json:"python_modules,omitempty"`
+	// Pip — зависимости из PyPI (paramiko>=3.4...). Центр скачивает колёса под
+	// платформу каждого хоста и привозит их сам: хосту не нужны ни pip, ни интернет.
+	Pip []string `json:"pip,omitempty"`
+	// Packages — системные пакеты по менеджерам (apt, dnf, yum, apk, zypper):
+	// при развёртывании центр ставит недостающие из репозиториев хоста.
+	Packages map[string][]string `json:"packages,omitempty"`
 	// Params — поля формы параметров, в том же формате, что у встроенных классов.
 	Params        []catalog.Field `json:"params,omitempty"`
 	DefaultParams map[string]any  `json:"default_params,omitempty"`
 }
 
+// PackageManagers — менеджеры пакетов, для которых манифест может перечислить пакеты.
+var PackageManagers = []string{"apt", "dnf", "yum", "apk", "zypper"}
+
 var (
 	nameRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 	requireRe = regexp.MustCompile(`^[A-Za-z0-9._+-]{1,64}$`)
+	pipRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?(\s*(==|!=|<=|>=|~=|<|>)\s*[A-Za-z0-9.*+!-]+(\s*,\s*(==|!=|<=|>=|~=|<|>)\s*[A-Za-z0-9.*+!-]+)*)?$`)
+	pkgRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_:-]{0,127}$`)
+	moduleRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}(\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,7}$`)
 	keyRe     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 )
 
@@ -120,6 +136,38 @@ func (m *Manifest) normalize() error {
 		if !requireRe.MatchString(r) {
 			return fmt.Errorf("requires: %q — имя команды, например python3", r)
 		}
+	}
+	if len(m.PythonModules) > 32 {
+		return fmt.Errorf("python_modules: не больше 32 модулей")
+	}
+	for _, mod := range m.PythonModules {
+		if !moduleRe.MatchString(mod) {
+			return fmt.Errorf("python_modules: %q — имя модуля, например paramiko", mod)
+		}
+	}
+	if len(m.Pip) > 32 {
+		return fmt.Errorf("pip: не больше 32 зависимостей")
+	}
+	for _, r := range m.Pip {
+		if len(r) > 200 || !pipRe.MatchString(r) {
+			return fmt.Errorf("pip: %q — зависимость в формате pip, например paramiko>=3.4", r)
+		}
+	}
+	for mgr, pkgs := range m.Packages {
+		if !slices.Contains(PackageManagers, mgr) {
+			return fmt.Errorf("packages: неизвестный менеджер %q, допустимы %s", mgr, strings.Join(PackageManagers, ", "))
+		}
+		if len(pkgs) > 32 {
+			return fmt.Errorf("packages.%s: не больше 32 пакетов", mgr)
+		}
+		for _, name := range pkgs {
+			if !pkgRe.MatchString(name) {
+				return fmt.Errorf("packages.%s: %q — имя пакета", mgr, name)
+			}
+		}
+	}
+	if (len(m.PythonModules) > 0 || len(m.Pip) > 0) && !slices.Contains(m.Requires, "python3") {
+		m.Requires = append(m.Requires, "python3")
 	}
 	if err := validateSchema(m.Params, "params", true); err != nil {
 		return err

@@ -1,6 +1,7 @@
 {
   "center_url": "http://app:8080",
   "token": "demo-ftp-token",
+  "server_pub_key": "c693f46070adc608005fa7754d4c663788eda306214be5bc5c268d5938a58a2b",
   "trap": {
     "class": "dialog",
     "bind": "0.0.0.0",
@@ -10,10 +11,25 @@
       "decoder": "line",
       "default_response": "530 Please login with USER and PASS.\r\n",
       "rules": [
-        { "match": "^USER\\s+(.*)$", "response": "331 Please specify the password.\r\n", "capture": "username" },
-        { "match": "^PASS\\s?(.*)$", "response": "530 Login incorrect.\r\n", "capture": "password" },
-        { "match": "^SYST", "response": "215 UNIX Type: L8\r\n" },
-        { "match": "^QUIT", "response": "221 Goodbye.\r\n", "close": true }
+        {
+          "match": "^USER\\s+(.*)$",
+          "response": "331 Please specify the password.\r\n",
+          "capture": "username"
+        },
+        {
+          "match": "^PASS\\s?(.*)$",
+          "response": "530 Login incorrect.\r\n",
+          "capture": "password"
+        },
+        {
+          "match": "^SYST",
+          "response": "215 UNIX Type: L8\r\n"
+        },
+        {
+          "match": "^QUIT",
+          "response": "221 Goodbye.\r\n",
+          "close": true
+        }
       ]
     }
   }

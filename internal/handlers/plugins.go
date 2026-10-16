@@ -27,28 +27,31 @@ type pluginUse struct {
 }
 
 type pluginView struct {
-	Name        string      `json:"name"`
-	Class       string      `json:"class"`
-	Title       string      `json:"title"`
-	Description string      `json:"description,omitempty"`
-	Version     string      `json:"version,omitempty"`
-	Mode        string      `json:"mode"`
-	Transport   string      `json:"transport"`
-	Command     []string    `json:"command"`
-	DefaultPort int         `json:"defaultPort,omitempty"`
-	Requires    []string    `json:"requires"`
-	Params      int         `json:"params"`
-	SHA256      string      `json:"sha256"`
-	Size        int64       `json:"size"`
-	UploadedAt  time.Time   `json:"uploadedAt"`
-	UsedBy      []pluginUse `json:"usedBy"`
+	Name        string              `json:"name"`
+	Class       string              `json:"class"`
+	Title       string              `json:"title"`
+	Description string              `json:"description,omitempty"`
+	Version     string              `json:"version,omitempty"`
+	Mode        string              `json:"mode"`
+	Transport   string              `json:"transport"`
+	Command     []string            `json:"command"`
+	DefaultPort int                 `json:"defaultPort,omitempty"`
+	Requires    []string            `json:"requires"`
+	Modules     []string            `json:"pythonModules,omitempty"`
+	Pip         []string            `json:"pip,omitempty"`
+	Packages    map[string][]string `json:"packages,omitempty"`
+	Params      int                 `json:"params"`
+	SHA256      string              `json:"sha256"`
+	Size        int64               `json:"size"`
+	UploadedAt  time.Time           `json:"uploadedAt"`
+	UsedBy      []pluginUse         `json:"usedBy"`
 }
 
 func newPluginView(rec models.Plugin, m *plugin.Manifest, traps []models.Trap) pluginView {
 	v := pluginView{
 		Name: rec.Name, Class: m.ClassID(), Title: m.Title, Description: m.Description, Version: m.Version,
 		Mode: m.Mode, Transport: m.Transport, Command: m.Command, DefaultPort: m.DefaultPort,
-		Requires: m.Requires, Params: len(m.Params), SHA256: rec.SHA256, Size: rec.Size, UploadedAt: rec.UploadedAt,
+		Requires: m.Requires, Modules: m.PythonModules, Pip: m.Pip, Packages: m.Packages, Params: len(m.Params), SHA256: rec.SHA256, Size: rec.Size, UploadedAt: rec.UploadedAt,
 		UsedBy: usesOf(m.ClassID(), traps),
 	}
 	if v.Requires == nil {

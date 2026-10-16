@@ -459,7 +459,7 @@ fn host_units(traps: Value) -> Vec<crate::runtime::Unit> {
 
 /// Свободный TCP-порт на loopback (сразу освобождаем — гонка в тестах приемлема).
 async fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port()
+    crate::plugin_tests::free_port()
 }
 
 #[tokio::test]
@@ -471,7 +471,7 @@ async fn runtime_serves_each_trap_with_its_own_sink() {
         { "token": "t-ftp", "name": "B", "class": "banner", "bind": "127.0.0.1", "port": p2,
           "params": { "banner": "BBB\\r\\n", "close_after_input": true } }
     ]));
-    let bound = crate::runtime::bind_all(&units).await.unwrap();
+    let bound = crate::plugin_tests::bind_all_settled(&units, 0).await.unwrap();
     assert_eq!(bound.len(), 2);
     let (s1, r1) = EventSink::test_sink();
     let (s2, r2) = EventSink::test_sink();
@@ -564,21 +564,23 @@ fn runtime_rejects_port_clash_but_allows_tcp_and_udp_on_same_number() {
 
 #[tokio::test]
 async fn runtime_bind_reports_every_busy_port_and_starts_nothing() {
-    let busy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Свой loopback-адрес: порты на 127.0.0.1 тем временем занимают параллельные тесты.
+    const IP: &str = "127.0.0.37";
+    let busy = TcpListener::bind((IP, 0)).await.unwrap();
     let busy_port = busy.local_addr().unwrap().port();
     let free = free_port().await;
     let units = host_units(json!([
-        { "token": "a", "name": "Free", "class": "banner", "bind": "127.0.0.1", "port": free },
-        { "token": "b", "name": "Busy", "class": "banner", "bind": "127.0.0.1", "port": busy_port }
+        { "token": "a", "name": "Free", "class": "banner", "bind": IP, "port": free },
+        { "token": "b", "name": "Busy", "class": "banner", "bind": IP, "port": busy_port }
     ]));
-    let errors = match crate::runtime::bind_all(&units).await {
+    let errors = match crate::plugin_tests::bind_all_settled(&units, 1).await {
         Ok(_) => panic!("занятый порт должен быть ошибкой"),
         Err(e) => e,
     };
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].contains("«Busy»") && errors[0].contains(&format!(":{busy_port}/tcp")), "{errors:?}");
     // Свободный порт тоже отпущен: агент не держит ничего, раз не стартует.
-    TcpListener::bind(("127.0.0.1", free)).await.expect("порт свободной ловушки должен освободиться");
+    crate::plugin_tests::rebind_settled(IP, free).await.expect("порт свободной ловушки должен освободиться");
 }
 
 #[test]

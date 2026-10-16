@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -285,13 +286,7 @@ func (h *Handlers) ProcessStealthEnvelope(ctx context.Context, raw []byte) error
 		return h.Store.TouchTrap(ctx, trap.Token)
 	}
 
-	for _, ev := range payload.Events {
-		if _, err := h.Store.InsertEvent(ctx, trap.ID, ev); err != nil {
-			return fmt.Errorf("insert event failed: %w", err)
-		}
-	}
-
-	return nil
+	return h.storeEvents(ctx, trap, payload.Events)
 }
 
 // HandleStealthIngest receives binary stealth envelopes and always returns 204 No Content,
@@ -305,4 +300,20 @@ func (h *Handlers) HandleStealthIngest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ServeStealthUDP принимает конверты транспорта udp_burst: одна датаграмма —
+// один конверт, ответа нет. Работает, пока conn не закроют.
+func (h *Handlers) ServeStealthUDP(ctx context.Context, conn net.PacketConn) error {
+	buf := make([]byte, 65535)
+	for {
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		_ = h.ProcessStealthEnvelope(ctx, append([]byte(nil), buf[:n]...))
+	}
 }

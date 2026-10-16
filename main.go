@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 	"honeyprower/internal/deploy"
 	"honeyprower/internal/handlers"
 	"honeyprower/internal/middleware"
+	"honeyprower/internal/pydeps"
 	"honeyprower/internal/router"
 	"honeyprower/internal/secret"
 	"honeyprower/internal/storage"
@@ -58,6 +60,10 @@ func main() {
 	handlers.Deployer = deploy.NewSSHDeployer()
 	handlers.AllowRegistration = honeycfg.AllowRegistration
 	handlers.PublicURL = honeycfg.PublicURL
+	handlers.PyDeps = &pydeps.Builder{Python: honeycfg.Python, CacheDir: honeycfg.PyDepsCache}
+	if err := setAgentTransport(handlers, honeycfg); err != nil {
+		log.Fatal(err)
+	}
 	box, err := loadSecretBox(honeycfg)
 	if err != nil {
 		log.Fatalf("secret key: %v", err)
@@ -103,7 +109,22 @@ func main() {
 
 	// ---------- run ----------
 	// Отслеживание цепочки ошибок в проверках ниже
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
+
+	// UDP-приёмник транспорта udp_burst: конверты без ответа и без соединений.
+	var udpConn net.PacketConn
+	if honeycfg.UDPAddr != "" {
+		udpConn, err = net.ListenPacket("udp", honeycfg.UDPAddr)
+		if err != nil {
+			log.Fatalf("UDP_INGEST_ADDR: %v", err)
+		}
+		log.Printf("udp ingest  → %s", udpConn.LocalAddr())
+		go func() {
+			if err := handlers.ServeStealthUDP(context.Background(), udpConn); err != nil {
+				errCh <- err
+			}
+		}()
+	}
 
 	// Ошибки запуска серверов попадают в errCh.
 	// http.ErrServerClosed значит, что сервер был выключен вручную, по сути не ошибка запуска, поэтому скип
@@ -139,12 +160,39 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_ = webSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
+	if udpConn != nil {
+		_ = udpConn.Close()
+	}
 	cancel()
 	if closeStore != nil {
 		_ = closeStore()
 	}
 	log.Println("'Bye")
 	os.Exit(exitCode)
+}
+
+// setAgentTransport выбирает, как агенты шлют события. udp_burst без
+// UDP-приёмника центра терял бы все события, поэтому это ошибка запуска.
+func setAgentTransport(h *handlers.Handlers, cfg *config.Config) error {
+	switch cfg.AgentTransport {
+	case "http_nolinger":
+	case "udp_burst":
+		if cfg.UDPAddr == "" {
+			return errors.New("AGENT_TRANSPORT=udp_burst requires UDP_INGEST_ADDR")
+		}
+		h.CenterUDP = cfg.PublicUDP
+		if h.CenterUDP == "" {
+			_, port, err := net.SplitHostPort(cfg.UDPAddr)
+			if err != nil {
+				return fmt.Errorf("UDP_INGEST_ADDR: %w", err)
+			}
+			h.CenterUDP = ":" + port // хост подставится из адреса центра
+		}
+	default:
+		return fmt.Errorf("AGENT_TRANSPORT=%q: expected http_nolinger or udp_burst", cfg.AgentTransport)
+	}
+	h.AgentTransport = cfg.AgentTransport
+	return nil
 }
 
 // loadSecretBox берёт ключ шифрования SSH-доступа к хостам: HF_SECRET_KEY или
@@ -171,9 +219,10 @@ func NewWebMux(cfg *config.Config, authMgr *auth.Manager, proxy http.Handler) *h
 	webMux := http.NewServeMux()
 	if proxy != nil {
 		webMux.Handle("/api/", proxy)
-		// Деплой и снятие по SSH идут дольше WriteTimeout веб-сервера — продлеваем срок только для них.
+		// Деплой и снятие по SSH идут дольше WriteTimeout веб-сервера — продлеваем срок только для них
+		// (на API-сервере то же делает router).
 		slowSSH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(4 * time.Minute))
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(router.SlowTimeout))
 			proxy.ServeHTTP(w, r)
 		})
 		webMux.Handle("POST /api/traps/{id}/deploy", slowSSH)

@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -54,6 +56,7 @@ type agentConfig struct {
 	Token         string      `json:"token,omitempty"`
 	ServerPubKey  string      `json:"server_pub_key,omitempty"`
 	Transport     string      `json:"transport,omitempty"`
+	CenterUDP     string      `json:"center_udp,omitempty"`
 	StealthPaths  []string    `json:"stealth_paths,omitempty"`
 	JitterS       int         `json:"jitter_s,omitempty"`
 	VerifyTLS     bool        `json:"verify_tls"`
@@ -66,9 +69,15 @@ type agentConfig struct {
 }
 
 func (h *Handlers) baseConfig(r *http.Request) agentConfig {
+	center := h.centerURL(r)
+	transport, udp := "http_nolinger", ""
+	if h.AgentTransport == "udp_burst" {
+		transport, udp = "udp_burst", h.centerUDP(center)
+	}
 	return agentConfig{
-		CenterURL:     h.centerURL(r),
-		Transport:     "http_nolinger",
+		CenterURL:     center,
+		Transport:     transport,
+		CenterUDP:     udp,
 		StealthPaths:  []string{"/cdn-cgi/rum", "/v1/rgstr", "/api/v2/metrics"},
 		JitterS:       10,
 		VerifyTLS:     true,
@@ -152,6 +161,21 @@ func (h *Handlers) centerURL(r *http.Request) string {
 		host = "127.0.0.1:8080"
 	}
 	return scheme + "://" + host
+}
+
+// centerUDP — адрес UDP-приёмника для агентов: CenterUDP, где пустой хост
+// заменяется хостом из адреса центра.
+func (h *Handlers) centerUDP(center string) string {
+	host, port, err := net.SplitHostPort(h.CenterUDP)
+	if err != nil || port == "" {
+		return h.CenterUDP
+	}
+	if host == "" {
+		if u, err := url.Parse(center); err == nil {
+			host = u.Hostname()
+		}
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // Возвращает информацию об скачиваемой ловушке
@@ -248,7 +272,22 @@ func generateRunInstructions(t *models.Trap, cfg agentConfig) string {
 		if len(p.manifest.Requires) > 0 {
 			extra += " На машине должны быть: " + strings.Join(p.manifest.Requires, ", ") + "."
 		}
+		if len(p.manifest.Pip) > 0 {
+			extra += "\nЗависимости Python поставьте в каталог проекта (агент сам добавит его в PYTHONPATH):\n" +
+				"     python3 -m pip install --target " + pluginDir(p, false) + "/.hf-pydeps " + shellQuote(p.manifest.Pip) + "\n"
+		} else if len(p.manifest.PythonModules) > 0 {
+			extra += " Модули Python: " + strings.Join(p.manifest.PythonModules, ", ") + "."
+		}
+		for _, mgr := range plugin.PackageManagers {
+			if pkgs := p.manifest.Packages[mgr]; len(pkgs) > 0 {
+				extra += "\nСистемные пакеты (" + mgr + "): " + strings.Join(pkgs, " ") + "."
+			}
+		}
 		extra += "\n"
+	}
+	sink := cfg.CenterURL + " — зашифрованно, POST на " + strings.Join(cfg.StealthPaths, ", ")
+	if cfg.Transport == "udp_burst" {
+		sink = cfg.CenterUDP + " — зашифрованно, UDP-датаграммами"
 	}
 	return fmt.Sprintf(`HoneyForge — ловушка «%s» (класс %s)
 
@@ -259,12 +298,12 @@ func generateRunInstructions(t *models.Trap, cfg agentConfig) string {
      ./honeyforge-agent config.json
 %s
 Ловушка поднимется на %s и будет слать телеметрию в центр:
-     %s/api/ingest
+     %s
 
 Токен ловушки уже вписан в config.json. Канал односторонний: из центра
 к агенту ничего не идёт. Чтобы изменить ловушку — обновите её на сайте,
 скачайте новый config.json и перезапустите агент.
-`, t.Name, t.Class, extra, where, cfg.CenterURL)
+`, t.Name, t.Class, extra, where, sink)
 }
 
 // addPluginToZip раскладывает архив плагина в zip под каталогом dir, сохраняя
@@ -295,4 +334,13 @@ func addPluginToZip(zw *zip.Writer, dir string, archive []byte) error {
 			return err
 		}
 	})
+}
+
+// shellQuote — аргументы для команды в инструкции: зависимости вроде paramiko>=3.4 в кавычках.
+func shellQuote(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = "'" + strings.ReplaceAll(a, "'", "'\\''") + "'"
+	}
+	return strings.Join(out, " ")
 }
